@@ -142,6 +142,16 @@ export function cuesOf(timeline: Timeline): Cue[] {
 /** The document's captions as an SRT file. */
 export const timelineSrt = (timeline: Timeline): string => toSrt(cuesOf(timeline), timeline.rate);
 
+/**
+ * Only the words, with none of the file around them.
+ *
+ * Which font a burn needs is a question about the characters a person wrote,
+ * and an SRT is mostly timestamps and index numbers. Asked of the file, every
+ * file is full of Latin digits and none of them ever appears to need a thing.
+ */
+export const captionText = (timeline: Timeline): string =>
+  cuesOf(timeline).map((c) => c.text).join('\n');
+
 /** The caption on screen at a frame, or null. Half-open, like every range. */
 export function captionAt(timeline: Timeline, at: Frames): Caption | null {
   for (const track of timeline.tracks) {

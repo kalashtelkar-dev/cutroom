@@ -254,9 +254,16 @@ were checked by reading the code they name.
 
 ## 7a. The tool rail, card by card
 
-Nine cards, nine tools. Checked against the account with `npm run cards`,
-which reads each pipeline and compares the plan's bindings to its real input
-node names. It is free and it exits non-zero.
+**One card is in play: `subtitle-burn`.** The other eight were archived to
+`lib/intel/archive/` to clear the shelf before Auto B-roll is built, so the
+rail has one tool and the router has one thing to route to. The table below
+is kept as it was rather than cut down, because what it records is what
+calling the API taught us about each card, and that is worth having when one
+comes back. Read it as history, not as an inventory.
+
+Checked against the account with `npm run cards`, which reads each pipeline
+and compares the plan's bindings to its real input node names. It is free and
+it exits non-zero.
 
 | Card | Rung | Needs a pipeline | State |
 |---|---|---|---|

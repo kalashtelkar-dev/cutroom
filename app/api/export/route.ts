@@ -42,6 +42,8 @@ const DEFAULT_DELIVERY: DeliverySpec = {
   // edit from the one on the timeline, and silently shipping that is worse
   // than the extra minutes.
   reencode: true,
+  // and never crop someone's picture unless they asked for it
+  fit: 'contain',
 };
 
 export async function POST(request: Request) {

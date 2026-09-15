@@ -33,10 +33,12 @@ import type { Frames } from '../../lib/time/frames.ts';
  * and the run card cannot disagree about how a glyph is drawn.
  *
  * Every glyph is a 16-unit box drawn to read at 17px with a 1.35 stroke.
- * Where a standard exists it is used: a CC box for subtitles, a contrast
- * disc for grade, faders for levels. Where none does, the glyph draws the
- * shape the tool leaves on the timeline: b-roll is two blocks sitting over a
- * track bar, blade is two blocks with the cut between them.
+ * Where a standard exists it is used, which is why subtitles are a CC box.
+ *
+ * One glyph per card in play, plus `graph` for a card nobody has drawn one
+ * for. The eight that belonged to the archived cards went with them:
+ * geometry for a tool that does not exist is a drawing nothing can render.
+ * `git log -p -- components/rail/tools.ts` has them if a card comes back.
  */
 export type IconShape =
   | { k: 'path'; d: string; solid?: boolean; dash?: string }
@@ -44,48 +46,9 @@ export type IconShape =
   | { k: 'circle'; cx: number; cy: number; r: number; solid?: boolean };
 
 const ICONS = {
-  blade: [
-    { k: 'rect', x: 1, y: 4, w: 5.2, h: 8, r: 1 },
-    { k: 'rect', x: 9.8, y: 4, w: 5.2, h: 8, r: 1 },
-    { k: 'path', d: 'M8 1.4v13.2', dash: '2.2 1.7' },
-  ],
-  ripple: [
-    { k: 'rect', x: 9.6, y: 4, w: 5.2, h: 8, r: 1 },
-    { k: 'path', d: 'M7.6 8H1.4M3.6 5.6L1.2 8l2.4 2.4' },
-  ],
-  punch: [
-    { k: 'rect', x: 1.2, y: 3, w: 13.6, h: 10, r: 1 },
-    { k: 'rect', x: 4.6, y: 5.4, w: 6.8, h: 5.2, r: 0.7 },
-  ],
-  broll: [
-    { k: 'rect', x: 1.2, y: 10.2, w: 13.6, h: 3.6, r: 0.8 },
-    { k: 'rect', x: 2.8, y: 3, w: 4, h: 3.6, r: 0.8 },
-    { k: 'rect', x: 9.2, y: 3, w: 4, h: 3.6, r: 0.8 },
-  ],
-  /** Planning hands back a list; weaving drops it onto the track below. */
-  weave: [
-    { k: 'rect', x: 1.2, y: 10.2, w: 13.6, h: 3.6, r: 0.8 },
-    { k: 'rect', x: 5.6, y: 1.4, w: 4.8, h: 3.4, r: 0.8 },
-    { k: 'path', d: 'M8 5.4v2.6M6.2 6.6L8 8.4l1.8-1.8' },
-  ],
-  tighten: [
-    { k: 'path', d: 'M8 1.8v12.4' },
-    { k: 'path', d: 'M1.4 8h4M14.6 8h-4' },
-    { k: 'path', d: 'M3.6 5.8L5.8 8l-2.2 2.2M12.4 5.8L10.2 8l2.2 2.2' },
-  ],
   subtitles: [
     { k: 'rect', x: 1.2, y: 3, w: 13.6, h: 10, r: 1.2 },
     { k: 'path', d: 'M3.8 9.6h3.6M9.6 9.6h2.6' },
-  ],
-  colour: [
-    { k: 'circle', cx: 8, cy: 8, r: 6.2 },
-    { k: 'path', d: 'M8 1.8a6.2 6.2 0 010 12.4z', solid: true },
-  ],
-  levels: [
-    { k: 'path', d: 'M1.6 4.2h12.8M1.6 8h12.8M1.6 11.8h12.8' },
-    { k: 'circle', cx: 5, cy: 4.2, r: 1.6, solid: true },
-    { k: 'circle', cx: 10.6, cy: 8, r: 1.6, solid: true },
-    { k: 'circle', cx: 6.8, cy: 11.8, r: 1.6, solid: true },
   ],
   /** A graph we cannot characterise: three nodes and a join. */
   graph: [
@@ -101,7 +64,21 @@ export const icon = (name: IconName): readonly IconShape[] => ICONS[name];
 
 // ── tools ───────────────────────────────────────────────────────────────
 
-export const GROUPS = ['CUT', 'BUILD', 'POLISH'] as const;
+/**
+ * The headings on the rail, in the order they appear.
+ *
+ * `GENERATE` was `BUILD`. The rail's groups name what a tool DOES to the cut,
+ * and the things that will live under this one all make something that was
+ * not there before, which "build" was too broad a word for once it was the
+ * only heading on screen.
+ *
+ * A card can name its own group in its front matter, so a card carrying
+ * `group: BUILD` now falls through to its PRESENTATION entry rather than
+ * matching: `presentationFor` only takes a group that is in this list. That
+ * is the right way round, and it is why the archived cards were left saying
+ * whatever they said.
+ */
+export const GROUPS = ['CUT', 'GENERATE', 'POLISH'] as const;
 export type ToolGroup = (typeof GROUPS)[number];
 
 export interface ToolParam {
@@ -154,59 +131,21 @@ interface Presentation {
   params?: ToolParam[];
 }
 
-const param = (key: string, label: string, options: string[], defaultIndex = 0): ToolParam => ({
-  key, label, options, defaultIndex,
-});
-
+/**
+ * What a card does not carry: a glyph, a group, a name, a precondition.
+ *
+ * One entry, because one card is in play. The other eight went to
+ * `lib/intel/archive/` with their cards, rather than being left here to
+ * describe tools the rail can no longer build: an entry whose card is gone
+ * is never read, and the next person to read this file would have taken it
+ * for a list of what Cutroom does.
+ *
+ * A card that comes back without an entry still reaches the rail through
+ * `improvise()`, under a name made from its id and the generic glyph. That
+ * is the seam a pipeline built in the workbench arrives through, and it is
+ * why nothing here is required.
+ */
 const PRESENTATION: Record<string, Presentation> = {
-  'timeline-blade': {
-    group: 'CUT', order: 0, name: 'Blade at playhead', icon: 'blade',
-    needs: 'a clip under the playhead',
-    requires: (c) => (c.splittableAtPlayhead ? null : 'no clip under the playhead to cut'),
-  },
-  'timeline-ripple': {
-    group: 'CUT', order: 1, name: 'Ripple delete', icon: 'ripple',
-    needs: 'one selected clip',
-    requires: (c) => (c.selection ? null : 'select a clip first'),
-  },
-  'timeline-punch': {
-    group: 'CUT', order: 2, name: 'Punch in', icon: 'punch',
-    needs: 'one selected video clip',
-    requires: (c) =>
-      c.selection && c.selection.trackKind === 'video' ? null : 'select a video clip first',
-  },
-
-  /**
-   * Two b-roll tools, and the rail has to say which is which.
-   *
-   * `broll-b1` plans: it hands back timings and generation prompts and
-   * touches nothing. `auto-broll-weave` goes on to trim the candidates and
-   * lay them on V2. The glyphs draw exactly that difference, blocks over a
-   * bar for the plan and the same blocks dropping into it for the weave, and
-   * the cards claim different phrases so the router never has to guess.
-   */
-  'broll-b1': {
-    group: 'BUILD', order: 0, name: 'Plan the B-roll', icon: 'broll',
-    needs: 'speech on a dialogue track',
-    requires: (c) => (c.hasAudio ? null : 'no audio track to find speech in'),
-  },
-  'auto-broll-weave': {
-    group: 'BUILD', order: 1, name: 'Weave in B-roll', icon: 'weave',
-    needs: 'speech on a dialogue track',
-    requires: (c) => (c.hasAudio ? null : 'no audio track to find speech in'),
-    params: [
-      param('density', 'Density', ['Sparse, 1 per 15s', 'Balanced, 1 per 9s', 'Dense, 1 per 5s'], 1),
-      param('source', 'Source', ['Media pool only', 'AISuite generations', 'Both'], 2),
-    ],
-  },
-  'tighten-cut': {
-    group: 'BUILD', order: 2, name: 'Tighten the cut', icon: 'tighten',
-    needs: 'speech on a dialogue track',
-    requires: (c) => (c.hasAudio ? null : 'no audio track to score sentences against'),
-    params: [
-      param('target', 'Target', ['30 seconds', '45 seconds', '60 seconds', 'As tight as it goes']),
-    ],
-  },
   /**
    * No params, because neither of the two it had reached anything.
    *
@@ -218,28 +157,9 @@ const PRESENTATION: Record<string, Presentation> = {
    * karaoke need a caption style the document cannot hold yet.
    */
   'subtitle-burn': {
-    group: 'BUILD', order: 3, name: 'Burn subtitles', icon: 'subtitles',
+    group: 'GENERATE', order: 3, name: 'Gen Subtitles', icon: 'subtitles',
     needs: 'speech on a dialogue track',
     requires: (c) => (c.hasAudio ? null : 'no audio track to transcribe'),
-  },
-
-  'colour-match': {
-    group: 'POLISH', order: 0, name: 'Match the colour', icon: 'colour',
-    needs: 'two or more video clips',
-    requires: (c) =>
-      c.videoClipCount > 1 ? null : 'needs two or more video clips to match between',
-    params: [
-      param('reference', 'Match to', ['The selected clip', 'The median of all shots', 'The first shot'], 1),
-    ],
-  },
-  'volume-adjust': {
-    group: 'POLISH', order: 1, name: 'Level the audio', icon: 'levels',
-    needs: 'at least one audio clip',
-    requires: (c) => (c.hasAudio ? null : 'nothing on the audio tracks'),
-    params: [
-      param('target', 'Dialogue', ['−14 LUFS (social)', '−16 LUFS (web)', '−23 LUFS (broadcast)'], 1),
-      param('music', 'Music', ['Duck under speech', 'Leave alone']),
-    ],
   },
 };
 

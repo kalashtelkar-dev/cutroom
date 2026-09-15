@@ -15,17 +15,6 @@
 import type { Timeline, PlacedItem, ClipId } from '../timeline/types.ts';
 import type { Frames } from '../time/frames.ts';
 
-export type MenuId = 'file' | 'edit' | 'clip' | 'timeline' | 'view' | 'help';
-
-export const MENUS: { id: MenuId; label: string }[] = [
-  { id: 'file', label: 'File' },
-  { id: 'edit', label: 'Edit' },
-  { id: 'clip', label: 'Clip' },
-  { id: 'timeline', label: 'Timeline' },
-  { id: 'view', label: 'View' },
-  { id: 'help', label: 'Help' },
-];
-
 export interface Shortcut {
   /** A KeyboardEvent.key value, compared case-insensitively. */
   key: string;
@@ -56,11 +45,11 @@ export interface CommandContext {
 export interface Command {
   id: string;
   label: string;
-  menu: MenuId;
   /**
-   * Items sharing a group sit together; a rule is drawn between groups. The
-   * grouping carries meaning (destructive things apart from safe ones), so it
-   * is declared rather than left to the order of the array.
+   * What kind of thing it is. It grouped the menu items and drew the rules
+   * between them; with the menus gone it is what the command palette sorts
+   * on, and it is worth keeping for that alone: "destructive things apart
+   * from safe ones" is a fact about the command, not about a menu.
    */
   group: string;
   shortcut?: Shortcut;

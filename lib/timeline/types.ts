@@ -161,6 +161,12 @@ export interface Timeline {
   etag?: string;
   /** Export pipeline ID preserved across machines and sessions. */
   exportPipelineId?: string;
+  /** Destination target identifier (e.g. youtube, instagram-reel). */
+  targetId?: string;
+  /** Target frame width in pixels. */
+  width?: number;
+  /** Target frame height in pixels. */
+  height?: number;
 }
 
 /** Derived, never stored: an item with the absolute position it lands at. */

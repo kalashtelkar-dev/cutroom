@@ -29,14 +29,14 @@ import {
   getNode, outPort, requireNode, validateParams, wireTarget,
 } from '../editor-api/catalogue.ts';
 import { GraphBuilder, layout, type Graph } from '../editor-api/graph.ts';
-import { placeTrack, timelineDuration } from '../timeline/document.ts';
+import { placeTrack, playingTracks, programmeDuration, timelineDuration } from '../timeline/document.ts';
 import {
   ZERO, frames, framesToSeconds, rangeEnd, rangeIntersection, rateEquals, rateFps,
-  scaleFrames, timeRange,
+  scaleFrames, timeRange, toTimecode,
   type Frames, type Rate, type TimeRange,
 } from '../time/frames.ts';
 import type { Clip, MediaRef, Timeline, Track } from '../timeline/types.ts';
-import type { CompileOptions, CompileResult, CompileWarning, DeliverySpec } from './types.ts';
+import type { CompileOptions, CompileResult, CompileWarning, DeliverySpec, FrameFit } from './types.ts';
 import { cacheKey, combineKeys } from './cache.ts';
 import { COMPOSITE_EFFECT, TRANSFORM_EFFECT, AUDIO_PAN_EFFECT } from '../inspector/effects.ts';
 
@@ -44,6 +44,56 @@ import { COMPOSITE_EFFECT, TRANSFORM_EFFECT, AUDIO_PAN_EFFECT } from '../inspect
 
 /** `ffmpeg/trim.durationSec` will not go below this. One frame at 30fps is under it. */
 const MIN_CUT_SECONDS = 0.04;
+/**
+ * The picture size the delivery asks for, clamped to what a filter will take.
+ *
+ * Written once because five places need the same two numbers and a sixth
+ * compares against them. `Ref.frame` carries this value forward so the
+ * delivery can tell a picture that is already the right shape from one that
+ * only happens to be a picture.
+ */
+const deliveryFrame = (ctx: Ctx): { w: number; h: number } => ({
+  w: clampInt(ctx.delivery.width, 16, 7680),
+  h: clampInt(ctx.delivery.height, 16, 4320),
+});
+
+/**
+ * A picture size in pixels. The delivery's frame, or the smaller box an upper
+ * track's own pictures occupy inside it. See `trackShape`.
+ */
+export interface Shape { w: number; h: number }
+
+/**
+ * The narrowest side a layer can be built at.
+ *
+ * `still`, `black` and `matchForJoin` all clamp a side to 16, so below that
+ * the shape stops being the picture's and starts being the clamp's.
+ */
+const MIN_LAYER_SIDE = 16;
+
+const sameShape = (a: Shape, b: Shape): boolean => a.w === b.w && a.h === b.h;
+
+/**
+ * The biggest box of a picture's shape that fits inside the frame.
+ *
+ * This is `object-fit: contain` as a pair of integers, and it is the same box
+ * `scale=W:H:force_original_aspect_ratio=decrease` arrives at. Even, because
+ * yuv420p has half as many chroma samples as luma in each direction and an
+ * odd size leaves the last row or column of one of them undefined.
+ */
+function containBox(width: number, height: number, frame: Shape): Shape {
+  const scale = Math.min(frame.w / width, frame.h / height);
+  // rounded down to even at the cap as well, so an odd delivery frame cannot
+  // hand an odd number to an encoder that will not take one
+  const even = (n: number, cap: number) =>
+    Math.max(2, Math.min(Math.round(n / 2) * 2, Math.floor(cap / 2) * 2));
+  return { w: even(width * scale, frame.w), h: even(height * scale, frame.h) };
+}
+
+/** Do two refs claim the same known picture size? Unknown never matches. */
+const sameFrame = (refs: readonly Ref[]): boolean =>
+  refs.every((r) => r.frame && r.frame.w === refs[0].frame?.w && r.frame.h === refs[0].frame?.h);
+
 /** `ffmpeg/synthetic.durationSec` will not go below this. */
 const MIN_GENERATED_SECONDS = 0.1;
 /** `ffmpeg/synthetic.durationSec` will not go above this one, either. */
@@ -222,6 +272,17 @@ interface Ref {
    * the demuxer instead of re-encoding.
    */
   origin: string;
+  /**
+   * The picture size this value is KNOWN to be, when a step pinned it there.
+   *
+   * Absent means the source's own size, whatever that is: a cut is the
+   * dimensions of the file it came out of and the compiler never probed it.
+   * The distinction matters exactly once, at the delivery, where a frame that
+   * is already 1080x1920 needs nothing and one that is 1920x1080 has to be
+   * fitted into it by us rather than by whatever `ffmpeg/transcode` does with
+   * a width and a height that do not match its input's shape.
+   */
+  frame?: { w: number; h: number };
 }
 
 type Warn = (w: CompileWarning) => void;
@@ -297,7 +358,7 @@ class Build {
     params: Record<string, unknown>,
     wires: ReadonlyArray<readonly [string, Ref]>,
     seconds: number,
-    opts: { type?: string; origin?: string; outPort?: string } = {},
+    opts: { type?: string; origin?: string; outPort?: string; frame?: { w: number; h: number } } = {},
   ): Ref {
     const spec = requireNode(opKey);
     const clean = defined(params);
@@ -326,7 +387,7 @@ class Build {
         this.cacheKeys[id] = key;
         this.standIns.set(id, key);
         this.inputKeys.set(id, key);
-        const twinable: Ref = { node: id, port: 'value', type, key, origin: `cached:${key}` };
+        const twinable: Ref = { node: id, port: 'value', type, key, origin: `cached:${key}`, frame: opts.frame };
         this.fresh.set(id, makeInput);
         return twinable;
       };
@@ -342,7 +403,7 @@ class Build {
       this.cacheKeys[id] = key;
       if (spec.gpu) this.nodeCost.set(id, cost(opKey, clean) * Math.max(0, seconds));
       this.nodeSeconds.set(id, Math.max(0, seconds));
-      const made: Ref = { node: id, port, type, key, origin: opts.origin ?? `node:${id}` };
+      const made: Ref = { node: id, port, type, key, origin: opts.origin ?? `node:${id}`, frame: opts.frame };
       this.fresh.set(id, makeNode);
       return made;
     };
@@ -502,13 +563,9 @@ const hasLiveClips = (track: Track): boolean =>
   track.items.some((i) => i.kind === 'clip' && i.enabled);
 
 /** Enabled tracks of a kind, honouring solo and (for sound) mute. */
-function activeTracks(timeline: Timeline, kind: Track['kind']): Track[] {
-  const all = timeline.tracks.filter(
-    (t) => t.kind === kind && t.enabled && !(kind === 'audio' && t.muted),
-  );
-  const solo = all.filter((t) => t.solo);
-  return solo.length ? solo : all;
-}
+// which tracks play is a document question, and `programmeDuration` asks it
+// too. One answer, imported, rather than the same rule written here as well
+const activeTracks = playingTracks;
 
 // ── segments ────────────────────────────────────────────────────────────
 
@@ -547,35 +604,39 @@ function media(ctx: Ctx, clip: Clip): MediaRef | undefined {
  * same black comes from lavfi through `ffmpeg/custom`, which has no limit at
  * either end.
  */
-function black(ctx: Ctx, duration: Frames): Ref {
+function black(ctx: Ctx, duration: Frames, shape: Shape): Ref {
   const rate = ctx.timeline.rate;
   const wanted = secs(duration, rate);
   if (wanted > MAX_GENERATED_SECONDS || (wanted > 0 && wanted < MIN_GENERATED_SECONDS)) {
-    return lavfiBlack(ctx, wanted);
+    return lavfiBlack(ctx, wanted, shape);
   }
   // a zero length gap is an empty timeline, already reported as one, and a
   // moment of black is the only thing that can be delivered for it
   const durationSec = Math.max(MIN_GENERATED_SECONDS, wanted);
+  // synthetic has a lower ceiling than the delivery clamp, so the frame this
+  // claims is the one it was actually given and not the one that was asked for
+  const w = clampInt(shape.w, 16, MAX_SYNTHETIC.width);
+  const h = clampInt(shape.h, 16, MAX_SYNTHETIC.height);
   return ctx.build.emit('ffmpeg/synthetic', {
     pattern: 'color',
     color: 'black',
-    width: clampInt(ctx.delivery.width, 16, MAX_SYNTHETIC.width),
-    height: clampInt(ctx.delivery.height, 16, MAX_SYNTHETIC.height),
+    width: w,
+    height: h,
     fps: round6(rateFps(rate)),
     durationSec,
     audio: false,
     container: INTERMEDIATE,
     videoCodec: 'h264',
-  }, [], durationSec);
+  }, [], durationSec, { frame: { w, h } });
 }
 
 /** The same black, for a length `ffmpeg/synthetic` will not take. */
-function lavfiBlack(ctx: Ctx, durationSec: number): Ref {
+function lavfiBlack(ctx: Ctx, durationSec: number, shape: Shape): Ref {
   const rate = ctx.timeline.rate;
-  // lavfi has no size ceiling either, so this is the delivery size rather
+  // lavfi has no size ceiling either, so this is the track's own size rather
   // than synthetic's UHD cap
-  const w = clampInt(ctx.delivery.width, 16, 7680);
-  const h = clampInt(ctx.delivery.height, 16, 4320);
+  const w = clampInt(shape.w, 16, 7680);
+  const h = clampInt(shape.h, 16, 4320);
   return ctx.build.emit('ffmpeg/custom', {
     args: [
       '-f', 'lavfi',
@@ -586,7 +647,7 @@ function lavfiBlack(ctx: Ctx, durationSec: number): Ref {
       '{out}',
     ],
     output: 'black.mp4',
-  }, [], durationSec, { type: 'file:video' });
+  }, [], durationSec, { type: 'file:video', frame: { w, h } });
 }
 
 /**
@@ -616,30 +677,48 @@ function silence(ctx: Ctx, duration: Frames): Ref {
 }
 
 /**
+ * The scale chain that brings a picture to the shape its track is built at.
+ *
+ * `exact` means the shape was measured from this picture's own size, so the
+ * scale lands on it and there is nothing to pad. Saying `scale=w:h` outright
+ * rather than fitting into it matters by up to two pixels: the box is rounded
+ * to an even size and `force_original_aspect_ratio=decrease` keeps the
+ * source's exact aspect instead, which leaves a black hairline down one edge
+ * of a layer that is laid over another track. A hundredth of a percent of
+ * stretch is invisible and a black line is not.
+ */
+function fitTo(shape: Shape, exact: boolean): string {
+  return exact
+    ? `scale=${shape.w}:${shape.h}`
+    : `scale=${shape.w}:${shape.h}:force_original_aspect_ratio=decrease,`
+      + `pad=${shape.w}:${shape.h}:(ow-iw)/2:(oh-ih)/2`;
+}
+
+/**
  * A still held for the clip's duration.
  *
  * An image is `file:image`, which `ffmpeg/trim` does not accept, so there is
  * nothing to trim: the picture is looped for as long as the clip runs.
  */
-function still(ctx: Ctx, image: Ref, duration: Frames): Ref {
+function still(ctx: Ctx, image: Ref, duration: Frames, shape: Shape, exact: boolean): Ref {
   const rate = ctx.timeline.rate;
   // as in silence(): ffmpeg/custom has no floor, and holding the picture for
   // longer than the slot asked for pushes everything after it out of sync
   const durationSec = Math.max(secs(ONE_FRAME, rate), secs(duration, rate));
-  const w = clampInt(ctx.delivery.width, 16, 7680);
-  const h = clampInt(ctx.delivery.height, 16, 4320);
+  const w = clampInt(shape.w, 16, 7680);
+  const h = clampInt(shape.h, 16, 4320);
   return ctx.build.emit('ffmpeg/custom', {
     args: [
       '-loop', '1',
       '-i', '{in0}',
       '-t', String(durationSec),
       '-r', String(round6(rateFps(rate))),
-      '-vf', `scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,format=yuv420p`,
+      '-vf', `${fitTo({ w, h }, exact)},format=yuv420p`,
       '-c:v', '{enc:h264}',
       '{out}',
     ],
     output: 'still.mp4',
-  }, [['input', image]], durationSec, { type: 'file:video' });
+  }, [['input', image]], durationSec, { type: 'file:video', frame: { w, h } });
 }
 
 /** One cut. This is the node the cache exists for. */
@@ -829,17 +908,29 @@ function applyEffects(ctx: Ctx, start: Ref, plan: PlannedEffect[], seconds: numb
  * can still fix it, and by then the slot it came from is long gone. A segment
  * that comes back from its encoder a frame long slides every cut after it.
  */
-interface Segment { ref: Ref; duration: Frames }
-
-/** One track's slots, each turned into a finished segment. */
-function videoSegments(ctx: Ctx, track: Track, slots: Slot[]): Segment[] {
-  return slots.map((slot) => ({ ref: videoSegment(ctx, track, slot), duration: slot.at.duration }));
+interface Segment {
+  ref: Ref;
+  duration: Frames;
+  /**
+   * Whether this segment is already the exact shape its track is built at, so
+   * a join that has to match it can scale straight to that shape. See `fitTo`.
+   */
+  exact?: boolean;
 }
 
-function videoSegment(ctx: Ctx, track: Track, slot: Slot): Ref {
+/** One track's slots, each turned into a finished segment. */
+function videoSegments(ctx: Ctx, track: Track, slots: Slot[], shape: TrackShape): Segment[] {
+  return slots.map((slot) => ({
+    ref: videoSegment(ctx, track, slot, shape),
+    duration: slot.at.duration,
+    exact: shape.measured,
+  }));
+}
+
+function videoSegment(ctx: Ctx, track: Track, slot: Slot, shape: TrackShape): Ref {
   return ((): Ref => {
     const clip = slot.clip;
-    if (!clip) return black(ctx, slot.at.duration);
+    if (!clip) return black(ctx, slot.at.duration, shape);
 
     const ref = media(ctx, clip);
     if (!ref) {
@@ -848,7 +939,7 @@ function videoSegment(ctx: Ctx, track: Track, slot: Slot): Ref {
         clipId: clip.id,
         message: `"${clip.name}" points at media "${clip.mediaKey}", which the document does not carry, so it is black`,
       });
-      return black(ctx, slot.at.duration);
+      return black(ctx, slot.at.duration, shape);
     }
     if (ref.kind === 'audio') {
       ctx.build.warn({
@@ -856,7 +947,7 @@ function videoSegment(ctx: Ctx, track: Track, slot: Slot): Ref {
         clipId: clip.id,
         message: `"${clip.name}" on picture track "${track.name}" is an audio file and has no picture, so it is black`,
       });
-      return black(ctx, slot.at.duration);
+      return black(ctx, slot.at.duration, shape);
     }
     reportRate(ctx, ref);
 
@@ -867,7 +958,7 @@ function videoSegment(ctx: Ctx, track: Track, slot: Slot): Ref {
     const segment = ref.kind === 'image'
       // a still has no source range to stretch, so a retime instead holds the
       // picture for longer and plays it back faster, which comes to the same
-      ? still(ctx, source, retimed(slot.at.duration, factor))
+      ? still(ctx, source, retimed(slot.at.duration, factor), shape, shape.measured)
       : cut(ctx, source, clip, retimedSource(ctx, clip, ref, slot.source, factor));
     return applyEffects(ctx, segment, plan, seconds);
   })();
@@ -938,22 +1029,21 @@ function reportRate(ctx: Ctx, ref: MediaRef): void {
  * back on at the end by `ffmpeg/audio-replace`, which is also what the
  * program monitor does, so the file and the monitor agree.
  */
-function matchForJoin(ctx: Ctx, segment: Segment): Ref {
+function matchForJoin(ctx: Ctx, segment: Segment, shape: Shape): Ref {
   const seconds = secs(segment.duration, ctx.timeline.rate);
   if (segment.ref.type === 'file:audio') {
     return ctx.build.emit('ffmpeg/extract-audio', { ...SOUND_SHAPE },
       [['input', segment.ref]], seconds, { type: 'file:audio', origin: SOUND_ORIGIN });
   }
-  const w = clampInt(ctx.delivery.width, 16, 7680);
-  const h = clampInt(ctx.delivery.height, 16, 4320);
+  const w = clampInt(shape.w, 16, 7680);
+  const h = clampInt(shape.h, 16, 4320);
   const fps = round6(rateFps(ctx.timeline.rate));
   ctx.fittedPicture = true;
   return ctx.build.emit('ffmpeg/custom', {
     args: [
       '-i', '{in0}',
       '-filter_complex',
-      `[0:v]scale=${w}:${h}:force_original_aspect_ratio=decrease,`
-      + `pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${fps},`
+      `[0:v]${fitTo({ w, h }, segment.exact === true)},setsar=1,fps=${fps},`
       // an encoder that hands back one frame more or less than it was asked
       // for slides every cut after this one, so the segment is held out to
       // its length and then cut to it exactly by -frames:v below
@@ -966,7 +1056,8 @@ function matchForJoin(ctx: Ctx, segment: Segment): Ref {
       '{out}',
     ],
     output: `fit.${INTERMEDIATE}`,
-  }, [['input', segment.ref]], seconds, { type: 'file:video', origin: PICTURE_ORIGIN });
+  }, [['input', segment.ref]], seconds,
+  { type: 'file:video', origin: PICTURE_ORIGIN, frame: { w, h } });
 }
 
 /**
@@ -979,7 +1070,7 @@ function matchForJoin(ctx: Ctx, segment: Segment): Ref {
  * untouched already agree, which is what `origin` is for: a track of stream
  * copies from one file still joins without re-encoding a frame.
  */
-function joinTrack(ctx: Ctx, segments: Segment[], seconds: number): Ref {
+function joinTrack(ctx: Ctx, segments: Segment[], seconds: number, shape: Shape): Ref {
   if (segments.length === 1) return segments[0].ref;
   if (segments.length > MAX_CONCAT_INPUTS) {
     // `ffmpeg/concat.inputs` stops at a hundred and a real cut sequence has
@@ -991,18 +1082,29 @@ function joinTrack(ctx: Ctx, segments: Segment[], seconds: number): Ref {
     for (let i = 0; i < segments.length; i += MAX_CONCAT_INPUTS) {
       const run = segments.slice(i, i + MAX_CONCAT_INPUTS);
       const length = run.reduce((n, s) => n + s.duration, 0) as Frames;
-      runs.push({ ref: joinTrack(ctx, run, secs(length, ctx.timeline.rate)), duration: length });
+      runs.push({
+        ref: joinTrack(ctx, run, secs(length, ctx.timeline.rate), shape),
+        duration: length,
+        // a matched run is already the track's shape, so the join above it
+        // scales to that shape and does not fit into it a second time
+        exact: true,
+      });
     }
-    return joinTrack(ctx, runs, seconds);
+    return joinTrack(ctx, runs, seconds, shape);
   }
   const uniform = new Set(segments.map((s) => s.ref.origin)).size === 1;
-  const inputs = uniform ? segments.map((s) => s.ref) : segments.map((s) => matchForJoin(ctx, s));
+  const inputs = uniform
+    ? segments.map((s) => s.ref)
+    : segments.map((s) => matchForJoin(ctx, s, shape));
   return ctx.build.emit('ffmpeg/concat', {
     reencode: false,
     container: INTERMEDIATE,
   }, inputs.map((s) => ['inputs', s] as const), seconds, {
     type: inputs[0].type,
     origin: inputs[0].origin,
+    // a join is as pinned as its inputs: one segment at the source's own size
+    // is enough to make the whole strip an unknown shape
+    frame: sameFrame(inputs) ? inputs[0].frame : undefined,
   });
 }
 
@@ -1076,6 +1178,85 @@ const isDefaultTransform = (t: TransformIntent) =>
 
 /** A zoom at or below this is not a picture, it is a rounding error. */
 const MIN_ZOOM = 0.01;
+
+/**
+ * The shape a picture track's segments are built at.
+ *
+ * `measured` says the box came from the track's own pictures rather than from
+ * the delivery, which is what lets a segment scale straight to it: see
+ * `fitTo`.
+ */
+interface TrackShape extends Shape {
+  measured: boolean;
+  /** Why it could not be measured, for the warning. Empty when it was. */
+  why: string;
+}
+
+/**
+ * The effects a picture comes out of the same shape it went in.
+ *
+ * A list of the ones that DO change it would be a guess: an effect names any
+ * operation in the catalogue that takes one input and returns one file, so
+ * `ffmpeg/crop` and `ffmpeg/rotate` are only the two that are easy to think
+ * of. Anything not named here makes the track unmeasurable, which costs one
+ * fitted layer and a sentence. Getting it wrong the other way costs a
+ * stretched picture nothing catches.
+ */
+const SHAPE_KEPT = new Set([
+  'ffmpeg/speed', 'ffmpeg/volume', COMPOSITE_EFFECT, TRANSFORM_EFFECT, AUDIO_PAN_EFFECT,
+]);
+
+/**
+ * What an upper picture track is fitted to, and why it is not the frame.
+ *
+ * A track above another one used to be built at the delivery size, which
+ * means a picture that is not the delivery's shape gets black bars padded
+ * around it, in the file, before anything lays it over the track below. That
+ * black is as opaque as the picture, so a square logo on V2 over a vertical
+ * cut on V1 covered the top and bottom of the programme with black that the
+ * viewer never showed: the viewer draws an `img` with `object-fit: contain`
+ * and nothing behind it, so there is nothing there to draw.
+ *
+ * `enable=` fixes the same problem in time and cannot fix it in space: the
+ * bars are inside every frame the track is on screen for. So the track is
+ * built at the box its own pictures occupy instead, and then there are no
+ * bars to lay over anything. `placement` fits that box inside `zoom` times
+ * the frame, which is the same picture the viewer draws.
+ *
+ * It takes every clip in range agreeing on one box, because a track is laid
+ * on as one layer. Anything unmeasurable answers the delivery frame, which is
+ * what the compiler did before: a clip with no size, a clip whose shape an
+ * effect changes after the cut, or two clips of different shapes.
+ */
+function trackShape(ctx: Ctx, slots: Slot[]): TrackShape {
+  const frame = deliveryFrame(ctx);
+  const no = (why: string): TrackShape => ({ ...frame, measured: false, why });
+  let box: Shape | null = null;
+  for (const slot of slots) {
+    const clip = slot.clip;
+    if (!clip) continue; // filler is generated at whatever box the clips want
+    const ref = media(ctx, clip);
+    if (!ref || !ref.width || !ref.height) {
+      return no(`"${clip.name}" does not report a picture size, so import it again to measure it`);
+    }
+    const shaping = clip.effects.find(
+      (fx) => fx.enabled && !SHAPE_KEPT.has(EFFECT_ALIASES[fx.kind] ?? fx.kind));
+    if (shaping) {
+      return no(`"${shaping.kind}" on "${clip.name}" may change its shape after the cut`);
+    }
+    const here = containBox(ref.width, ref.height, frame);
+    if (here.w < MIN_LAYER_SIDE || here.h < MIN_LAYER_SIDE) {
+      // a sliver: the filters below clamp a side to 16 and that clamp is what
+      // would be drawn, stretched, instead of the picture
+      return no(`"${clip.name}" is ${ref.width}x${ref.height}, which is too thin to lay out at ${frame.w}x${frame.h}`);
+    }
+    if (box && !sameShape(box, here)) {
+      return no('its clips are different shapes and a track is laid on as one layer');
+    }
+    box = here;
+  }
+  return box ? { ...box, measured: true, why: '' } : no('it carries no picture');
+}
 
 /** The inspector's Position unit: a fifth of a percent of the frame. */
 const POSITION_UNIT = 0.002;
@@ -1196,7 +1377,7 @@ function transformLayer(ctx: Ctx, ref: Ref, xf: TransformIntent, seconds: number
     ],
     output: `placed.${INTERMEDIATE}`,
     tier: 'cpu',
-  }, [['input', ref]], seconds, { type: 'file:video' });
+  }, [['input', ref]], seconds, { type: 'file:video', frame: { w, h } });
 }
 
 /**
@@ -1309,24 +1490,34 @@ function layerOver(
   const w = clampInt(ctx.delivery.width, 16, 7680);
   const h = clampInt(ctx.delivery.height, 16, 4320);
   const fps = round6(rateFps(ctx.timeline.rate));
-  const fit = `scale=${w}:${h}:force_original_aspect_ratio=decrease,`
+  // The base needs padding to the full frame so every pixel is defined.
+  const fitBase = `scale=${w}:${h}:force_original_aspect_ratio=decrease,`
     + `pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,fps=${fps},format=yuv420p`;
+  // The top must NOT be padded: a pad is opaque black laid over V1 below.
+  // Instead, scale with decrease and let overlay's x/y centre it.
+  const fitTop = `scale=${w}:${h}:force_original_aspect_ratio=decrease,`
+    + `setsar=1,fps=${fps},format=yuv420p`;
   // quoted, because the filter graph is split on commas and `between(t,a,b)`
   // is full of them
   const gate = runs ? `:enable='${gateExpression(runs, ctx.timeline.rate)}'` : '';
   const blend = `blend=all_mode=${intent.mode}:all_opacity=${intent.opacity}`;
+  // centre a scaled-but-unpadded top over the base
+  const cx = '(W-w)/2';
+  const cy = '(H-h)/2';
 
   const filter = ((): string => {
-    if (!isDefaultTransform(xf)) return placedFilter(ctx, fit, intent, xf, gate);
+    if (!isDefaultTransform(xf)) return placedFilter(ctx, fitBase, intent, xf, gate);
     if (isDefaultIntent(intent)) {
-      return `[0:v]${fit}[base];[1:v]${fit}[top];`
-        + `[base][top]overlay=x=0:y=0${gate},${HOLD_LAST},format=yuv420p[v]`;
+      return `[0:v]${fitBase}[base];[1:v]${fitTop}[top];`
+        + `[base][top]overlay=x=${cx}:y=${cy}${gate},${HOLD_LAST},format=yuv420p[v]`;
     }
     if (!runs) {
-      return `[0:v]${fit}[base];[1:v]${fit}[top];`
+      // blend requires same-size inputs, so both sides must be padded
+      return `[0:v]${fitBase}[base];[1:v]${fitBase}[top];`
         + `[base][top]${blend},${HOLD_LAST},format=yuv420p[v]`;
     }
-    return `[0:v]${fit},split[keep][under];[1:v]${fit}[top];`
+    // gated blend: blend against a copy, then gate the result over the original
+    return `[0:v]${fitBase},split[keep][under];[1:v]${fitBase}[top];`
       + `[under][top]${blend}[mixed];`
       + `[keep][mixed]overlay=x=0:y=0${gate},${HOLD_LAST},format=yuv420p[v]`;
   })();
@@ -1357,7 +1548,7 @@ function layerOver(
     args,
     output: `layer.${INTERMEDIATE}`,
     tier: 'cpu',
-  }, [['input', base], ['input', top]], seconds, { type: 'file:video' });
+  }, [['input', base], ['input', top]], seconds, { type: 'file:video', frame: { w, h } });
 }
 
 /** One picture track, ready to be laid over the ones below it. */
@@ -1391,8 +1582,16 @@ function composite(
    * nothing to show through it, so its gaps are black either way, and its
    * blend mode has nothing to blend with.
    */
+  /**
+   * A layer built at its own box, rather than at the frame, is folded too.
+   * `ffmpeg/compose` arranges cells and the compiler does not know what it
+   * puts around a cell that does not fill its canvas, and a wrong guess there
+   * is the black this shape exists to remove. `overlay` is ours to write.
+   */
+  const frame = deliveryFrame(ctx);
+  const offFrame = (l: Layer) => !!l.ref.frame && !sameShape(l.ref.frame, frame);
   const wantsFold = layers.slice(1).some(
-    (l) => !isDefaultIntent(l.intent) || l.runs || !isDefaultTransform(l.xf));
+    (l) => !isDefaultIntent(l.intent) || l.runs || !isDefaultTransform(l.xf) || offFrame(l));
   if (wantsFold) {
     let base = layers[0].ref;
     for (let i = 1; i < layers.length; i += 1) {
@@ -1434,7 +1633,7 @@ function composite(
     container: INTERMEDIATE,
     audio: keepSound ? 'first' : 'none',
     audioBitrate: isBitrate(ctx.delivery.audioBitrate) ? ctx.delivery.audioBitrate : '192k',
-  }, used.map((r) => ['inputs', r] as const), seconds);
+  }, used.map((r) => ['inputs', r] as const), seconds, { frame: { w: width, h: height } });
 }
 
 /**
@@ -1500,12 +1699,136 @@ function mix(ctx: Ctx, beds: Ref[], seconds: number): Ref | null {
   return layer[0];
 }
 
-/** Burn a subtitle file into the picture. Nothing in ffmpeg's node set does this. */
-function burnIn(ctx: Ctx, video: Ref, subtitle: Ref, seconds: number): Ref {
+/**
+ * Put the font inside the subtitle file.
+ *
+ * `ffmpeg/custom` wires at most two inputs and the burn spends both on the
+ * picture and the cues, so a third file cannot reach it. ffmpeg's subtitles
+ * filter loads font attachments out of the file it is given, which makes the
+ * subtitle file the way in: srt plus ttf, muxed to an mkv, one stream copy.
+ *
+ * Both metadata tags are load bearing. Matroska refuses an attachment with no
+ * `filename`, and the filter reads `mimetype` to decide an attachment is a
+ * font at all, so an mkv missing either one muxes happily and then burns the
+ * same boxes it would have without it.
+ */
+function attachFont(
+  ctx: Ctx, subtitle: Ref, font: Ref, file: string, seconds: number,
+): Ref {
   return ctx.build.emit('ffmpeg/custom', {
-    args: ['-i', '{in0}', '-vf', 'subtitles={in1}', '-c:a', 'copy', '{out}'],
+    args: [
+      '-i', '{in0}', '-attach', '{in1}',
+      '-metadata:s:t:0', 'mimetype=application/x-truetype-font',
+      '-metadata:s:t:0', `filename=${file}`,
+      '-c', 'copy', '{out}',
+    ],
+    output: 'captions.mkv',
+  }, [['input', subtitle], ['input', font]], seconds, { type: 'file:subtitle' });
+}
+
+/**
+ * Burn a subtitle file into the picture. Nothing in ffmpeg's node set does this.
+ *
+ * `family` names the attached font. libass matches an attachment by family
+ * and will not fall back to one for a glyph it is missing, so attaching a
+ * font without naming it here renders byte-for-byte the same boxes as not
+ * attaching it: measured, both ways round.
+ */
+function burnIn(ctx: Ctx, video: Ref, subtitle: Ref, seconds: number, family?: string): Ref {
+  // the style is single-quoted inside one argv token, which is where libass
+  // wants it: these are argv elements, so the shell never sees any of it
+  const filter = family ? `subtitles={in1}:force_style='FontName=${family}'` : 'subtitles={in1}';
+  return ctx.build.emit('ffmpeg/custom', {
+    args: ['-i', '{in0}', '-vf', filter, '-c:a', 'copy', '{out}'],
     output: 'subtitled.mp4',
-  }, [['input', video], ['input', subtitle]], seconds, { type: 'file:video' });
+  }, [['input', video], ['input', subtitle]], seconds,
+  // libass draws into the frame it is handed and does not resize it
+  { type: 'file:video', frame: video.frame });
+}
+
+/**
+ * Put the programme in the delivery frame, ourselves.
+ *
+ * `ffmpeg/transcode` takes a width and a height and the catalogue does not
+ * say what it does when their shape is not the input's: letterbox, stretch or
+ * crop are all defensible and the schema names none of them. That question
+ * never came up while every export was 16:9 footage into a 16:9 frame, where
+ * the three answers are the same answer. A vertical delivery is the first
+ * time they differ, and guessing which one the server picked is exactly the
+ * mistake that has cost this project the most: anything that touches the API
+ * is verified by calling it, and what is not verified is not relied on.
+ *
+ * So the geometry is decided here, in a filter we wrote, and the transcode
+ * that follows is handed a picture already at its own width and height, where
+ * every reading of a resize agrees.
+ *
+ * It runs BEFORE the subtitle burn on purpose. libass draws into the frame it
+ * is given, so burning first and fitting afterwards would shrink the captions
+ * into the letterbox with the picture and leave them a third of the size they
+ * were asked for.
+ */
+function fitFrame(ctx: Ctx, ref: Ref, seconds: number, fit: FrameFit): Ref {
+  const { w, h } = deliveryFrame(ctx);
+  const fps = round6(rateFps(ctx.timeline.rate));
+  /**
+   * `decrease` then pad: the whole picture, with bars where it does not
+   * reach. `increase` then crop: the frame filled, with whatever falls
+   * outside it gone. `force_divisible_by=2` on the first because yuv420p
+   * has half as many chroma samples as luma and an odd size leaves the last
+   * column of one of them undefined; the crop lands on the exact size
+   * already, so it needs nothing.
+   */
+  const geometry = fit === 'cover'
+    ? `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h}`
+    : `scale=${w}:${h}:force_original_aspect_ratio=decrease:force_divisible_by=2,`
+      + `pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2`;
+  return ctx.build.emit('ffmpeg/custom', {
+    args: [
+      '-i', '{in0}',
+      '-filter_complex', `[0:v]${geometry},setsar=1,fps=${fps},format=yuv420p[v]`,
+      '-map', '[v]',
+      // the mix is already on this file and re-encoding it here would be a
+      // lossy generation for nothing
+      '-map', '0:a?',
+      '-c:v', '{enc:h264}', '-pix_fmt', 'yuv420p', '-c:a', 'copy',
+      '{out}',
+    ],
+    output: `frame.${INTERMEDIATE}`,
+  }, [['input', ref]], seconds, { type: 'file:video', frame: { w, h } });
+}
+
+/**
+ * Can the fit be skipped?
+ *
+ * Only when the picture is provably already the right shape, and there are
+ * two ways to know that. Either a step upstream pinned it to the delivery
+ * frame, which `Ref.frame` records, or every piece of footage that reaches
+ * the frame carries a size and all of them have the delivery's aspect, in
+ * which case a resize is a resize whichever way the server implements it.
+ *
+ * A clip whose media never reported a size is not evidence of anything, so it
+ * answers no. The cost of a wrong yes is a stretched or cropped delivery that
+ * nothing catches; the cost of a wrong no is one encode.
+ */
+function alreadyFitted(ctx: Ctx, picture: Ref, compiled: TimeRange): boolean {
+  const { w, h } = deliveryFrame(ctx);
+  if (picture.frame && picture.frame.w === w && picture.frame.h === h) return true;
+
+  const wanted = w / h;
+  let seen = 0;
+  for (const track of activeTracks(ctx.timeline, 'video')) {
+    for (const placed of placeTrack(track)) {
+      const item = placed.item;
+      if (item.kind !== 'clip' || !item.enabled) continue;
+      if (!rangeIntersection(placed.range, compiled)) continue;
+      const media = ctx.timeline.media[item.mediaKey];
+      if (!media?.width || !media.height) return false;
+      if (Math.abs(media.width / media.height - wanted) > 0.002) return false;
+      seen += 1;
+    }
+  }
+  // nothing measured is not a match: an empty answer must never read as yes
+  return seen > 0;
 }
 
 /**
@@ -1548,7 +1871,28 @@ export function compile(timeline: Timeline, opts: CompileOptions): CompileResult
     fittedPicture: false,
   };
   const rate = timeline.rate;
-  const total = timelineDuration(timeline);
+  /**
+   * The programme, not the timeline.
+   *
+   * These were the same number until an export came back four seconds longer
+   * than the cut, with nothing in the tail. The length used to be the longest
+   * track of any kind, summed item by item, so a gap left behind by a delete,
+   * a switched off clip, or a subtitle cue sitting past the end of the
+   * footage all bought real generated black in the delivered file. Every one
+   * of them is a thing that puts nothing on screen, so none of them is a
+   * length. `programmeDuration` is the last frame that carries picture or
+   * sound, and that is what gets encoded.
+   */
+  const total = programmeDuration(timeline);
+  const extent = timelineDuration(timeline);
+  if (extent > total) {
+    build.warn({
+      code: 'empty_track',
+      message: `the timeline runs to ${toTimecode(extent, rate)} and the last picture or sound ends at `
+        + `${toTimecode(total, rate)}, so the render stops there rather than adding `
+        + `${toTimecode((extent - total) as Frames, rate)} of black to the end`,
+    });
+  }
 
   // what to build: the whole programme, or the slice a preview asked for
   const asked = opts.range
@@ -1603,7 +1947,24 @@ export function compile(timeline: Timeline, opts: CompileOptions): CompileResult
     }
     if (slots.some((s) => s.clip === null)) anyFiller = true;
     const xf = trackTransform(ctx, track);
-    const joined = joinTrack(ctx, videoSegments(ctx, track, slots), seconds);
+    /**
+     * Only a layer with something under it is built at its own box. The
+     * bottom layer has nothing to cover, so what it does not fill is black
+     * either way, and the delivery expects a picture the size of the frame.
+     */
+    const shape: TrackShape = above
+      ? trackShape(ctx, slots)
+      : { ...deliveryFrame(ctx), measured: false, why: '' };
+    if (above && !shape.measured) {
+      const frame = deliveryFrame(ctx);
+      build.warn({
+        code: 'unsupported_effect',
+        message: `"${track.name}" sits over another track and ${shape.why}, so it is fitted to `
+          + `the ${frame.w}x${frame.h} delivery frame: if it is not that shape, the bars that `
+          + 'fitting it adds are laid over the track below as black',
+      });
+    }
+    const joined = joinTrack(ctx, videoSegments(ctx, track, slots, shape), seconds, shape);
     layers.push({
       // the bottom layer is placed here and once, because nothing lays it over
       // anything; every layer above it is placed by the fold that draws it
@@ -1627,7 +1988,9 @@ export function compile(timeline: Timeline, opts: CompileOptions): CompileResult
       }
       continue; // silence adds nothing to a sum
     }
-    beds.push(joinTrack(ctx, audioSegments(ctx, track, slots), seconds));
+    // the shape is a picture's business; a sound track's segments are matched
+    // to one another by `SOUND_SHAPE` and never scaled
+    beds.push(joinTrack(ctx, audioSegments(ctx, track, slots), seconds, deliveryFrame(ctx)));
   }
 
   // ── e. the composite ──────────────────────────────────────────────────
@@ -1647,18 +2010,29 @@ export function compile(timeline: Timeline, opts: CompileOptions): CompileResult
   }
   let picture = layers.length
     ? composite(ctx, layers, seconds, compiled.duration, keepSound)
-    : black(ctx, compiled.duration);
+    : black(ctx, compiled.duration, deliveryFrame(ctx));
 
   // ── g. the sound onto the picture ─────────────────────────────────────
   const bed = mix(ctx, beds, seconds);
   if (bed) {
+    const carried = picture.frame;
     picture = build.emit('ffmpeg/audio-replace', {
       // both streams are built to the compiled length, and `shortest` would
       // let a millisecond of rounding in the sound clip the tail of the picture
       shortest: false,
       container: INTERMEDIATE,
       audioBitrate: isBitrate(opts.delivery.audioBitrate) ? opts.delivery.audioBitrate : '192k',
-    }, [['input', picture], ['audio', bed]], seconds, { type: 'file:video' });
+      // the sound is swapped and the picture is passed through, frame and all
+    }, [['input', picture], ['audio', bed]], seconds, { type: 'file:video', frame: carried });
+  }
+
+  // ── g2. the delivery frame ────────────────────────────────────────────
+  /**
+   * Vertical delivery is the reason this step exists. See `fitFrame`.
+   */
+  const fit: FrameFit = opts.delivery.fit ?? 'contain';
+  if (!alreadyFitted(ctx, picture, compiled)) {
+    picture = fitFrame(ctx, picture, seconds, fit);
   }
 
   // ── h. subtitles ──────────────────────────────────────────────────────
@@ -1683,7 +2057,31 @@ export function compile(timeline: Timeline, opts: CompileOptions): CompileResult
         'file:subtitle',
       )
       : subtitleSource(ctx);
-    if (captions) picture = burnIn(ctx, picture, captions, seconds);
+    if (captions) {
+      /**
+       * The font, when the cues are written in something the render
+       * container cannot draw.
+       *
+       * Same shape as the SRT and for the same reason: reading and uploading
+       * a font is a network call, so `exportTimeline` does it and passes the
+       * key. No font means the server's own draws the cues, which for Latin
+       * it does perfectly well, and one less node is one less job.
+       */
+      const font = opts.subtitleFont;
+      const withFont = font
+        ? attachFont(
+          ctx,
+          captions,
+          ctx.build.source(
+            { key: font.key, name: font.file, kind: 'video', available: timeRange(ZERO, compiled.duration) },
+            'file:document',
+          ),
+          font.file,
+          seconds,
+        )
+        : captions;
+      picture = burnIn(ctx, picture, withFont, seconds, font?.family);
+    }
   }
 
   // ── i. the delivery ───────────────────────────────────────────────────

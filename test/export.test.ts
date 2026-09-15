@@ -12,6 +12,7 @@ import assert from 'node:assert/strict';
 import { exportTimeline, dryRun } from '../lib/export/render.ts';
 import { ExportError, type ExportEvent, type ExportTransport, type RunSnapshot } from '../lib/export/types.ts';
 import { emptyTimeline } from '../lib/timeline/document.ts';
+import { applyEdits } from '../lib/timeline/edits.ts';
 import { RATES, frames, timeRange, type Frames } from '../lib/time/frames.ts';
 import type { Clip, Timeline } from '../lib/timeline/types.ts';
 import type { DeliverySpec } from '../lib/compiler/types.ts';
@@ -50,6 +51,10 @@ interface Knobs {
   runError?: unknown;
   signs?: boolean;
   headEtag?: string;
+  /** Make the font upload refuse, to prove the render survives it. */
+  fontFails?: string;
+  /** A transport too old to know about fonts at all. */
+  noFontUpload?: boolean;
 }
 
 interface Recorder {
@@ -57,10 +62,15 @@ interface Recorder {
   runInput: Record<string, string> | null;
   replacedWith: { id: string; etag: string } | null;
   importedName: string | null;
+  /** Every font the sequence asked for, by family. */
+  fonts: string[];
+  uploaded: { filename: string; text: string }[];
 }
 
 function fake(knobs: Knobs = {}): { transport: ExportTransport; rec: Recorder } {
-  const rec: Recorder = { calls: [], runInput: null, replacedWith: null, importedName: null };
+  const rec: Recorder = {
+    calls: [], runInput: null, replacedWith: null, importedName: null, fonts: [], uploaded: [],
+  };
   const statuses = [...(knobs.statuses ?? ['running', 'succeeded'])];
   let clock = 0;
 
@@ -114,6 +124,19 @@ function fake(knobs: Knobs = {}): { transport: ExportTransport; rec: Recorder } 
       if (knobs.signs === false) return {};
       return Object.fromEntries(keys.map((k) => [k, `https://signed/${k}?sig=x`]));
     },
+    uploadText: async (filename, text) => {
+      rec.calls.push('uploadText');
+      rec.uploaded.push({ filename, text });
+      return 'obj/captions.srt';
+    },
+    ...(knobs.noFontUpload ? {} : {
+      uploadFont: async (font) => {
+        rec.calls.push('uploadFont');
+        rec.fonts.push(font.family);
+        if (knobs.fontFails) throw new Error(knobs.fontFails);
+        return 'obj/NotoSansDevanagari.ttf';
+      },
+    }),
     wait: async () => { clock += 2000; },
     now: () => clock,
   };
@@ -254,6 +277,114 @@ describe('export failures say which step and why', () => {
 
   test('a run that never finishes gives up rather than polling forever', async () => {
     await expectFail(doc(), { statuses: ['running'] }, 'running', /after 30 minutes/);
+  });
+});
+
+// ── the font the captions need ──────────────────────────────────────────
+
+/**
+ * A timeline with captions on it, in whichever script the test is about.
+ *
+ * The cues go on a real subtitle track through a real edit, because what
+ * decides the font is the text of the document's cues and a fixture that
+ * shortcuts that decides nothing.
+ */
+function captioned(...lines: string[]): Timeline {
+  const t = doc();
+  const withTrack = applyEdits(t, [{
+    op: 'add_track',
+    at: t.tracks.length,
+    track: {
+      id: 'trk_s1', kind: 'subtitle', name: 'Subtitles 1',
+      locked: false, muted: false, solo: false, enabled: true, autoSelect: true,
+    },
+  }]).timeline;
+  return applyEdits(withTrack, lines.map((text, i) => ({
+    op: 'add_caption' as const,
+    trackId: 'trk_s1',
+    at: F(i * 24),
+    caption: { id: `cap_${i}`, kind: 'caption' as const, text, duration: F(24), enabled: true },
+  }))).timeline;
+}
+
+const HINDI = 'आप नहीं समझोगी मम्मी, कितना मसाला बच जाता है इनमें।';
+
+describe('captions in a script the render server cannot draw', () => {
+  test('Hindi cues fetch the Devanagari font and hand it to the compiler', async () => {
+    const { transport, rec } = fake();
+    const { events } = collect();
+    const emit = (e: ExportEvent) => { events.push(e); };
+
+    await exportTimeline(captioned(HINDI), { delivery: HD, burnSubtitles: true }, transport, emit);
+
+    assert.deepEqual(rec.fonts, ['Noto Sans Devanagari']);
+    assert.ok(
+      Object.values(rec.runInput ?? {}).includes('obj/NotoSansDevanagari.ttf'),
+      'the font was uploaded and then never reached the run',
+    );
+    assert.ok(events.some((e) => /burned with Noto Sans Devanagari/.test(e.message)));
+  });
+
+  test('the question is asked of the words, not of the SRT around them', async () => {
+    // an SRT is mostly timestamps and index numbers, and those are Latin
+    // digits: ask the file and no file ever appears to need anything
+    const { transport, rec } = fake();
+    await exportTimeline(captioned('Plain english here'), { delivery: HD, burnSubtitles: true },
+      transport, collect().emit);
+    assert.deepEqual(rec.fonts, [], 'Latin captions do not need a font uploading');
+  });
+
+  test('no burn asked for, no font fetched', async () => {
+    const { transport, rec } = fake();
+    await exportTimeline(captioned(HINDI), { delivery: HD }, transport, collect().emit);
+    assert.deepEqual(rec.fonts, []);
+  });
+
+  test('a font that will not upload costs the glyphs, not the render', async () => {
+    const { transport } = fake({ fontFails: 'the bucket said no' });
+    const { events, emit } = collect();
+    const r = await exportTimeline(captioned(HINDI), { delivery: HD, burnSubtitles: true }, transport, emit);
+    assert.ok(r.url, 'the whole render was lost over a font');
+    assert.ok(events.some((e) => /render as empty boxes.*the bucket said no/.test(e.message)));
+  });
+
+  test('a transport that cannot upload a font says so rather than pretending', async () => {
+    const { transport } = fake({ noFontUpload: true });
+    const { events, emit } = collect();
+    await exportTimeline(captioned(HINDI), { delivery: HD, burnSubtitles: true }, transport, emit);
+    assert.ok(events.some((e) => /cannot upload a font/.test(e.message)));
+  });
+
+  test('a font we have and cannot reach reads differently from one we lack', async () => {
+    const { transport, rec } = fake();
+    const { events, emit } = collect();
+    // Hindi and Chinese in one timeline: both have fonts and the burn names
+    // one, so the loser is not a missing file and must not be reported as one
+    await exportTimeline(captioned(HINDI, '这是中文字幕'), { delivery: HD, burnSubtitles: true }, transport, emit);
+    assert.deepEqual(rec.fonts, ['Noto Sans Devanagari']);
+    assert.ok(
+      events.some((e) => /a burn can name one font.*Chinese will render as empty boxes/.test(e.message)),
+      'the Chinese cues go to boxes and the export has to say which and why',
+    );
+    assert.ok(
+      !events.some((e) => /no bundled font covers/.test(e.message)),
+      'sending someone to find a font that is already in the repo',
+    );
+  });
+
+  test('a script nothing covers is said out loud before the spend, not after', async () => {
+    const { transport, rec } = fake();
+    const { events, emit } = collect();
+    // Tibetan: named by the table that reports scripts, absent from the one
+    // that ships fonts, which is the case that has to speak up
+    await exportTimeline(captioned('བོད་སྐད།'), { delivery: HD, burnSubtitles: true }, transport, emit);
+    assert.deepEqual(rec.fonts, []);
+    const warned = events.findIndex((e) => /no bundled font covers Tibetan/.test(e.message));
+    assert.ok(warned >= 0, 'Tibetan captions would have rendered as boxes with no word said');
+    assert.ok(
+      warned < events.findIndex((e) => e.phase === 'running'),
+      'a warning after the GPU has been spent is a receipt, not a warning',
+    );
   });
 });
 

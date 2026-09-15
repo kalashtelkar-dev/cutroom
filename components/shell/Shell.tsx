@@ -31,6 +31,9 @@ import { Inspector, DEFAULT_CLIP_PARAMS, type ClipParams } from '../inspector/In
 import { Resizer } from '../ui/Resizer.tsx';
 import { TooltipLayer, tip } from '../ui/Tooltip.tsx';
 import type { PlayheadController } from '../timeline/Playhead.tsx';
+import {
+  fitTimelineHeight, TIMELINE_MIN_HEIGHT, VIEWER_MIN_HEIGHT,
+} from '../timeline/interactions.ts';
 import { isClip } from '@/lib/timeline/document.ts';
 import { rateLabel, toTimecode, type Frames } from '@/lib/time/frames.ts';
 import type { MediaRef, PlacedItem, Timeline } from '@/lib/timeline/types.ts';
@@ -86,6 +89,21 @@ export interface ShellProps {
   clipParams?: Record<string, ClipParams>;
   onClipParamsChange?: (clipId: string, next: ClipParams) => void;
   onOpenWorkbench?: () => void;
+  /** Navigate back to the projects gallery. */
+  onNavigateProjects?: () => void;
+  /**
+   * Opens the export dialog. Left off, the toolbar shows no Export button at
+   * all rather than one that reports it cannot.
+   */
+  onExport?: () => void;
+  /** Files chosen or dropped anywhere the pool accepts them. */
+  onImportFiles?: (files: File[]) => void;
+  /** Opens the host's file picker, for the pool's and the toolbar's Import. */
+  onPickFiles?: () => void;
+  /** Opens the jobs and logs panel, from the toolbar. */
+  onOpenJobs?: () => void;
+  /** What autosave is doing, shown beside the project name. */
+  saveState?: string | null;
   /**
    * Takes over saying things out loud. One message, one place on screen: when
    * this is given the shell stops rendering its own toast, because two toasts
@@ -99,7 +117,6 @@ export interface ShellProps {
 
 const BROWSER_DEFAULT = 288;
 const INSPECTOR_DEFAULT = 284;
-const TIMELINE_DEFAULT = 340;
 
 const subscribeToResize = (cb: () => void) => {
   window.addEventListener('resize', cb);
@@ -133,11 +150,24 @@ export function Shell({
   clipParams,
   onClipParamsChange,
   onOpenWorkbench,
+  onNavigateProjects,
+  onExport,
+  onImportFiles,
+  onPickFiles,
+  onOpenJobs,
+  saveState,
   onNotify,
   children,
 }: ShellProps) {
+  /**
+   * The inspector starts closed, like the pool.
+   *
+   * It has nothing to say until a clip is picked, and until then it is a
+   * column of empty state taking width off the viewer and the timeline. The
+   * toolbar button opens it, and it stays open for the rest of the session.
+   */
   const [panels, setPanels] = useState<Record<PanelId, boolean>>({
-    assistant: true, pool: false, inspector: true,
+    assistant: false, pool: true, inspector: false,
   });
   const [browserW, setBrowserW] = useState(BROWSER_DEFAULT);
   const [inspectorW, setInspectorW] = useState(INSPECTOR_DEFAULT);
@@ -169,6 +199,27 @@ export function Shell({
   }, [onClipParamsChange]);
 
   const browserShown = panels.assistant || panels.pool;
+
+  /**
+   * Which of the two to bring back, remembered across a collapse.
+   *
+   * Written in an effect and not during render. A ref assignment while
+   * rendering is a side effect, and React may render without committing:
+   * `MenuBar.tsx` has the same note on the same mistake.
+   */
+  const lastBrowserTab = useRef<'assistant' | 'pool'>('pool');
+  useEffect(() => {
+    if (browserShown) lastBrowserTab.current = panels.pool ? 'pool' : 'assistant';
+  }, [browserShown, panels.pool]);
+
+  /**
+   * Why Export cannot run, in the same words the File menu used before the
+   * button took its place. A render of nothing is not worth the GPU, and the
+   * button says so on hover rather than going quiet.
+   */
+  const exportDisabled = timeline.tracks.some((t) => t.items.some((i) => i.kind === 'clip'))
+    ? null
+    : 'there is nothing on the timeline to export';
   const tab: 'assistant' | 'pool' = panels.pool && !panels.assistant ? 'pool' : 'assistant';
 
   // Not memoised, deliberately. The card registry is mutable, the workbench
@@ -189,7 +240,17 @@ export function Shell({
   // state update chasing a value React can read directly.
   const vw = useSyncExternalStore(subscribeToResize, () => window.innerWidth, () => 1440);
   const vh = useSyncExternalStore(subscribeToResize, () => window.innerHeight, () => 900);
-  const timelineH = timelineDrag ?? Math.round(vh * 0.42);
+  /**
+   * The timeline is docked at the bottom and is as tall as its tracks.
+   *
+   * A fixed fraction of the window meant a four track cut sat above a hand's
+   * width of empty ground, with the viewer squeezed to hold it. `fitTimelineHeight`
+   * sums the lanes that exist, so adding a track grows the panel by exactly
+   * that track and the viewer keeps the rest. A drag still wins, and the
+   * resizer's reset puts it back on the tracks rather than on a number.
+   */
+  const fittedTimelineH = fitTimelineHeight(timeline.tracks, vh);
+  const timelineH = timelineDrag ?? fittedTimelineH;
 
   // One owner. The host's toast and the shell's sit at the same fixed
   // position, so whichever is going to speak has to be the only one that does.
@@ -318,11 +379,17 @@ export function Shell({
         <Toolbar
           projectName={timeline.name}
           rate={timeline.rate}
+          resolution={timeline.width && timeline.height ? `${timeline.width}x${timeline.height}` : undefined}
           revision={timeline.revision}
           active={panels}
           onTogglePanel={togglePanel}
-          onOpenPalette={() => setPaletteOpen(true)}
           onOpenWorkbench={onOpenWorkbench}
+          onNavigateProjects={onNavigateProjects}
+          onImport={onPickFiles}
+          onOpenJobs={onOpenJobs}
+          saveState={saveState}
+          onExport={onExport}
+          exportDisabled={exportDisabled}
           undoLabel={undoLabel}
           redoLabel={redoLabel}
           onUndo={onUndo}
@@ -347,7 +414,24 @@ export function Shell({
                 data-focused={!viewerFocused ? 'true' : undefined}
                 onPointerDown={() => setViewerFocused(false)}
               >
+                {/*
+                  Media Pool first.
+
+                  It is the tab this column opens on and the one every cut
+                  starts in: you import before you ask for anything. Reading
+                  order is left to right, so the default sat second.
+                */}
                 <div className="cr-btabs" role="tablist" aria-label="Browser">
+                  <button
+                    type="button"
+                    role="tab"
+                    className="cr-btab"
+                    aria-selected={tab === 'pool'}
+                    data-on={tab === 'pool' ? 'true' : undefined}
+                    onClick={() => setPanels((p) => ({ ...p, pool: true, assistant: false }))}
+                  >
+                    Media Pool
+                  </button>
                   <button
                     type="button"
                     role="tab"
@@ -358,15 +442,20 @@ export function Shell({
                   >
                     Assistant
                   </button>
+                  <span className="cr-bsp" />
                   <button
                     type="button"
-                    role="tab"
-                    className="cr-btab"
-                    aria-selected={tab === 'pool'}
-                    data-on={tab === 'pool' ? 'true' : undefined}
-                    onClick={() => setPanels((p) => ({ ...p, pool: true, assistant: false }))}
+                    className="cr-bcollapse"
+                    aria-label="Collapse the browser"
+                    data-tip={tip(
+                      'Collapse',
+                      'Gives the column back to the viewer and the timeline. The strip it leaves behind opens it again.',
+                    )}
+                    onClick={() => setPanels((p) => ({ ...p, assistant: false, pool: false }))}
                   >
-                    Media Pool
+                    <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="M9.5 3.5L5 8l4.5 4.5" />
+                    </svg>
                   </button>
                 </div>
 
@@ -402,6 +491,8 @@ export function Shell({
                       }}
                       onRemove={onRemoveMedia}
                       onProbe={(m) => setProbingMedia(m)}
+                      onImportFiles={onImportFiles}
+                      onPickFiles={onPickFiles}
                     />
                   )}
                 </div>
@@ -418,7 +509,29 @@ export function Shell({
                 onReset={() => say('Panel reset to its default width')}
               />
             </>
-          ) : null}
+          ) : (
+            /**
+             * The way back.
+             *
+             * The toolbar used to hold the only controls that opened this
+             * column, and they went because the tabs inside it said the same
+             * two words. A collapse with no matching expand would have been
+             * the worse half of that trade, so the strip it leaves is the
+             * button: narrow, always there, and it reopens whichever of the
+             * two panels was last up.
+             */
+            <button
+              type="button"
+              className="cr-bopen"
+              aria-label="Open the browser"
+              data-tip={tip('Assistant and Media Pool', 'The column you collapsed. It comes back where you left it.')}
+              onClick={() => setPanels((p) => ({ ...p, [lastBrowserTab.current]: true }))}
+            >
+              <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M6.5 3.5L11 8l-4.5 4.5" />
+              </svg>
+            </button>
+          )}
 
           <div className="cr-viewers">
             <Viewer
@@ -465,13 +578,16 @@ export function Shell({
         <Resizer
           orientation="horizontal"
           size={timelineH}
-          min={150}
-          max={Math.max(200, vh - 260)}
-          defaultSize={TIMELINE_DEFAULT}
+          min={TIMELINE_MIN_HEIGHT}
+          max={Math.max(TIMELINE_MIN_HEIGHT, vh - VIEWER_MIN_HEIGHT)}
+          defaultSize={fittedTimelineH}
           invert
           label="Resize timeline"
           onResize={setTimelineDrag}
-          onReset={() => say('Timeline reset to its default height')}
+          // null, not the fitted number: back on the tracks, so the next one
+          // added grows the panel again instead of scrolling inside a height
+          // somebody's double-click happened to pin
+          onReset={() => { setTimelineDrag(null); say('Timeline fitted to its tracks'); }}
         />
 
         <div className="cr-tlwrap" style={{ height: timelineH }}>{children}</div>
@@ -523,15 +639,47 @@ function MediaPool({
   onSelect,
   onRemove,
   onProbe,
+  onImportFiles,
+  onPickFiles,
 }: {
   timeline: Timeline;
   selectedKey?: string | null;
   onSelect?: (key: string) => void;
   onRemove?: (key: string) => void;
   onProbe?: (media: MediaRef) => void;
+  onImportFiles?: (files: File[]) => void;
+  onPickFiles?: () => void;
 }) {
   const [filter, setFilter] = useState('');
   const [list, setList] = useState(false);
+  const [over, setOver] = useState(false);
+
+  /**
+   * Files dropped from the desktop, which is not the drag this panel already
+   * had.
+   *
+   * A pool tile is itself draggable, onto the timeline, and that drag carries
+   * `DRAG_TYPE` and a media key. This one carries `Files`. Reading the types
+   * list rather than the payload is what keeps the two apart: a tile dragged
+   * within the pool must not read as an import, and a file from Finder must
+   * not be mistaken for a tile.
+   */
+  const hasFiles = (e: React.DragEvent) => e.dataTransfer.types.includes('Files');
+
+  const onDragOver = useCallback((e: React.DragEvent) => {
+    if (!onImportFiles || !hasFiles(e)) return;
+    e.preventDefault();               // without this the browser opens the file
+    e.dataTransfer.dropEffect = 'copy';
+    setOver(true);
+  }, [onImportFiles]);
+
+  const onDrop = useCallback((e: React.DragEvent) => {
+    if (!onImportFiles || !hasFiles(e)) return;
+    e.preventDefault();
+    setOver(false);
+    const files = [...e.dataTransfer.files];
+    if (files.length) onImportFiles(files);
+  }, [onImportFiles]);
 
   const all = Object.values(timeline.media);
   const q = filter.trim().toLowerCase();
@@ -557,7 +705,18 @@ function MediaPool({
   }, [timeline.tracks]);
 
   return (
-    <div className="cr-pool">
+    <div
+      className="cr-pool"
+      data-over={over ? 'true' : undefined}
+      onDragOver={onDragOver}
+      onDragEnter={onDragOver}
+      // dragleave fires when the pointer crosses onto a child, so the ring
+      // is dropped only when the pointer has actually left the panel
+      onDragLeave={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setOver(false);
+      }}
+      onDrop={onDrop}
+    >
       <div className="cr-poolbar">
         <input
           value={filter}
@@ -598,7 +757,13 @@ function MediaPool({
 
       {all.length === 0 ? (
         <p className="cr-poolnone">
-          Nothing imported yet. File &gt; Import media, or drop a file on the timeline.
+          {/*
+            It used to say "or drop a file on the timeline", which was not
+            true: the timeline's drop accepts a pool tile and ignores a file
+            from the desktop. This panel is the one that takes files, so this
+            is the one that says so.
+          */}
+          Nothing imported yet. Drop files here, or use Import in the toolbar.
         </p>
       ) : shown.length === 0 ? (
         <p className="cr-poolnone">Nothing in the pool matches “{filter}”.</p>
@@ -979,6 +1144,24 @@ const CSS = `
 }
 .cr-poolvw button[data-on]{color:var(--orange);background:var(--edge-soft)}
 .cr-poolnone{padding:20px 12px;font-size:12px;color:var(--t3);text-align:center;border: 1px dashed var(--edge-soft); border-radius: 8px; margin: 20px 12px;}
+.cr-poolimp{
+  display:flex;align-items:center;gap:5px;flex:none;
+  font:inherit;font-size:11.5px;font-weight:600;color:var(--t1);
+  background:var(--edge);border:1px solid var(--edge-soft);border-radius:4px;
+  padding:3px 8px;cursor:pointer;
+}
+.cr-poolimp:hover{background:var(--edge-soft)}
+/* the whole panel is the drop target, so the whole panel is what lights up:
+   a small zone inside a large empty panel is a target people miss */
+.cr-pool{position:relative}
+.cr-pool[data-over]::after{
+  content:'Drop to import';
+  position:absolute;inset:6px;z-index:5;pointer-events:none;
+  display:flex;align-items:center;justify-content:center;
+  font-size:12px;font-weight:600;color:var(--t1);
+  border:2px dashed var(--red);border-radius:8px;
+  background:color-mix(in srgb, var(--red) 12%, transparent);
+}
 .cr-grid{
   display:grid;grid-template-columns:repeat(auto-fill,minmax(78px,1fr));
   gap:7px;padding:10px;overflow:auto;min-height:0;align-content:start;

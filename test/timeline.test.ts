@@ -446,8 +446,12 @@ describe('normalisation', () => {
       { op: 'add_gap', trackId: 'trk_a3', at: f(0), duration: f(24) },
       { op: 'add_gap', trackId: 'trk_a3', at: f(0), duration: f(12) },
     ]).timeline;
+    const merged = items(after, 'trk_a3')[0];
     assert.equal(items(after, 'trk_a3').length, 1);
-    assert.equal(trackDuration(findTrack(after, 'trk_a3')!), 36);
+    // the gap's own duration, not the track's: a track that is nothing but a
+    // gap is a track with nothing on it, and is now zero frames long
+    assert.equal(merged.kind === 'gap' && merged.duration, 36);
+    assert.equal(trackDuration(findTrack(after, 'trk_a3')!), 0);
   });
 
   test('a zero-duration gap occupies nothing and is dropped', () => {
@@ -457,10 +461,24 @@ describe('normalisation', () => {
     assert.deepEqual(items(after, 'trk_a3'), []);
   });
 
-  test('a trailing gap is kept, because it is the track length', () => {
+  /**
+   * The gap stays in the items and stops counting toward the length.
+   *
+   * It is kept because a delete is not a ripple: an undo has to put the clip
+   * back where it was, and the hole is what holds the place. It stops being
+   * the length because nothing comes after it, so there is no edit and no
+   * frame that depends on it. That distinction reached a rendered file: the
+   * track went on claiming 148 frames, the export compiled the tail as real
+   * black, and a cut that ended at 100 came back 48 frames longer with
+   * nothing in them.
+   */
+  test('a trailing gap is kept as an item, and is not part of the length', () => {
     const after = applyEdits(base(), [{ op: 'remove_clip', clipId: 'clp_b' }]).timeline;
     assert.deepEqual(ids(after, 'trk_v1').length, 2);
-    assert.equal(trackDuration(findTrack(after, 'trk_v1')!), 148);
+    const tail = items(after, 'trk_v1')[1];
+    assert.equal(tail.kind, 'gap');
+    assert.equal(tail.kind === 'gap' && tail.duration, 48, 'the hole is still the clip\u2019s size');
+    assert.equal(trackDuration(findTrack(after, 'trk_v1')!), 100, 'and the track ends at the last clip');
   });
 
   test('a negative duration is refused at the door', () => {
@@ -480,8 +498,11 @@ describe('moving a clip', () => {
 
     // the source keeps its shape: a gap where the clip was
     assert.deepEqual(ids(after, 'trk_v1'), ['clp_a', items(after, 'trk_v1')[1].id]);
-    assert.equal(items(after, 'trk_v1')[1].kind, 'gap');
-    assert.equal(trackDuration(findTrack(after, 'trk_v1')!), 148);
+    const hole = items(after, 'trk_v1')[1];
+    assert.equal(hole.kind, 'gap');
+    assert.equal(hole.kind === 'gap' && hole.duration, 48, 'the whole of what was lifted');
+    // the hole is trailing, so it holds the place without lengthening the track
+    assert.equal(trackDuration(findTrack(after, 'trk_v1')!), 100);
 
     // the destination is overwritten for exactly the clip's length
     assert.deepEqual(ids(after, 'trk_v2'), ['clp_b', 'clp_d_b']);

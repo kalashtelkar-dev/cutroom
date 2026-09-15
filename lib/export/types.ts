@@ -31,6 +31,7 @@
  */
 import type { Graph, Diagnostic } from '../editor-api/graph.ts';
 import type { DeliverySpec, CompileWarning } from '../compiler/types.ts';
+import type { SubtitleFont } from '../subtitles/fonts.ts';
 
 export type ExportPhase =
   | 'compiling' | 'checking' | 'validating' | 'saving'
@@ -128,6 +129,16 @@ export interface ExportTransport {
    * can still export everything that is not captioned.
    */
   uploadText?(filename: string, text: string): Promise<string>;
+  /**
+   * Put one of the bundled subtitle fonts in storage and return its key.
+   *
+   * Reading the file is the transport's job rather than the sequence's for
+   * the same reason the API key is: `exportTimeline` stays a function of its
+   * arguments, and everything that touches the disk or the network sits on
+   * one side of it. Optional, because a transport that cannot do it can
+   * still export, and the captions come out as boxes rather than not at all.
+   */
+  uploadFont?(font: SubtitleFont): Promise<string>;
   /** Injected so a test does not wait in real time. */
   wait(ms: number): Promise<void>;
   now(): number;

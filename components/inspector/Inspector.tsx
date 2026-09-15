@@ -20,7 +20,7 @@ import { useRef, useState } from 'react';
 import type { PlacedItem, MediaRef } from '@/lib/timeline/types.ts';
 import { isClip } from '@/lib/timeline/document.ts';
 import {
-  rangeEnd, rateLabel, scaleFrames, toTimecode, type Rate,
+  rangeEnd, toTimecode, type Rate,
 } from '@/lib/time/frames.ts';
 import { clampTo, fieldText, nextField, type FieldState } from './numberField.ts';
 import { BLEND_MODES, DEFAULT_CLIP_PARAMS, type ClipParams } from './types.ts';
@@ -83,7 +83,7 @@ interface Group {
 
 const f = (digits: number) => (v: number) => v.toFixed(digits);
 
-const VIDEO_GROUPS: Group[] = [
+const GROUPS: Group[] = [
   {
     key: 'transform', name: 'Transform', toggle: 'transformOn', openByDefault: true,
     rows: [
@@ -94,30 +94,12 @@ const VIDEO_GROUPS: Group[] = [
     ],
   },
   {
-    key: 'crop', name: 'Cropping', toggle: 'cropOn', openByDefault: false,
-    rows: [
-      { kind: 'slider', key: 'cropL', name: 'Crop Left', min: 0, max: 45, step: 0.5, format: f(1) },
-      { kind: 'slider', key: 'cropR', name: 'Crop Right', min: 0, max: 45, step: 0.5, format: f(1) },
-      { kind: 'slider', key: 'cropT', name: 'Crop Top', min: 0, max: 45, step: 0.5, format: f(1) },
-      { kind: 'slider', key: 'cropB', name: 'Crop Bottom', min: 0, max: 45, step: 0.5, format: f(1) },
-    ],
-  },
-  {
     key: 'composite', name: 'Composite', toggle: 'compositeOn', openByDefault: true,
     rows: [
       { kind: 'select', key: 'blend', name: 'Mode', options: BLEND_MODES },
       { kind: 'slider', key: 'opacity', name: 'Opacity', min: 0, max: 100, step: 1, format: f(1) },
     ],
   },
-  {
-    key: 'speed', name: 'Speed Change', toggle: 'speedOn', openByDefault: false,
-    rows: [
-      { kind: 'slider', key: 'speed', name: 'Speed %', min: 10, max: 400, step: 1, format: f(0) },
-    ],
-  },
-];
-
-const AUDIO_GROUPS: Group[] = [
   {
     key: 'audio', name: 'Volume', toggle: 'audioOn', openByDefault: true,
     rows: [
@@ -137,12 +119,9 @@ export interface InspectorProps {
   onChange: (next: ClipParams) => void;
 }
 
-type Tab = 'video' | 'audio' | 'file';
-
 export function Inspector({ clip, rate, media, params, onChange }: InspectorProps) {
-  const [tab, setTab] = useState<Tab>('video');
   const [open, setOpen] = useState<Record<string, boolean>>(() =>
-    Object.fromEntries([...VIDEO_GROUPS, ...AUDIO_GROUPS].map((g) => [g.key, g.openByDefault])),
+    Object.fromEntries(GROUPS.map((g) => [g.key, g.openByDefault])),
   );
 
   const item = clip && isClip(clip.item) ? clip.item : null;
@@ -154,30 +133,12 @@ export function Inspector({ clip, rate, media, params, onChange }: InspectorProp
     set(patch);
   };
 
-  const groups = tab === 'video' ? VIDEO_GROUPS : tab === 'audio' ? AUDIO_GROUPS : [];
-
   const [keyframes, setKeyframes] = useState<Record<string, boolean>>({});
 
   return (
     <>
       <style href="cutroom-inspector" precedence="medium">{CSS}</style>
       <aside className="cr-insp" aria-label="Inspector">
-        <div className="cr-itabs" role="tablist" aria-label="Inspector sections">
-          {(['video', 'audio', 'file'] as Tab[]).map((t) => (
-            <button
-              key={t}
-              type="button"
-              role="tab"
-              className="cr-itab"
-              aria-selected={tab === t}
-              data-on={tab === t ? 'true' : undefined}
-              onClick={() => setTab(t)}
-            >
-              {t === 'video' ? 'Video' : t === 'audio' ? 'Audio' : 'File'}
-            </button>
-          ))}
-        </div>
-
         <div className="cr-ibody">
           {!item || !clip ? (
             <div className="cr-inone">
@@ -197,69 +158,58 @@ export function Inspector({ clip, rate, media, params, onChange }: InspectorProp
                 </div>
               </div>
 
-              {tab === 'file' ? (
-                <FilePane clip={clip} media={media} rate={rate} />
-              ) : (
-                groups.map((g) => (
-                  <section className="cr-grp" key={g.key} data-open={open[g.key] ? 'true' : undefined}>
-                    <div className="cr-grphd">
-                      <button
-                        type="button"
-                        className="cr-tg"
-                        role="switch"
-                        aria-checked={params[g.toggle]}
-                        aria-label={`${g.name} enabled`}
-                        data-on={params[g.toggle] ? 'true' : undefined}
-                        onClick={() => set({ [g.toggle]: !params[g.toggle] } as Partial<ClipParams>)}
-                      />
-                      <button
-                        type="button"
-                        className="cr-grpname"
-                        aria-expanded={!!open[g.key]}
-                        onClick={() => setOpen((p) => ({ ...p, [g.key]: !p[g.key] }))}
-                      >
-                        <span className="cr-ch" aria-hidden="true">▶</span>
-                        {g.name}
-                      </button>
-                      <button
-                        type="button"
-                        className="cr-rs"
-                        aria-label={`Reset ${g.name}`}
-                        title={`Reset ${g.name}`}
-                        onClick={() => resetGroup(g)}
-                      >
-                        <ResetIcon />
-                      </button>
-                    </div>
+              {GROUPS.map((g) => (
+                <section className="cr-grp" key={g.key} data-open={open[g.key] ? 'true' : undefined}>
+                  <div className="cr-grphd">
+                    <button
+                      type="button"
+                      className="cr-tg"
+                      role="switch"
+                      aria-checked={params[g.toggle]}
+                      aria-label={`${g.name} enabled`}
+                      data-on={params[g.toggle] ? 'true' : undefined}
+                      onClick={() => set({ [g.toggle]: !params[g.toggle] } as Partial<ClipParams>)}
+                    />
+                    <button
+                      type="button"
+                      className="cr-grpname"
+                      aria-expanded={!!open[g.key]}
+                      onClick={() => setOpen((p) => ({ ...p, [g.key]: !p[g.key] }))}
+                    >
+                      <span className="cr-ch" aria-hidden="true">▶</span>
+                      {g.name}
+                    </button>
+                    <button
+                      type="button"
+                      className="cr-rs"
+                      aria-label={`Reset ${g.name}`}
+                      title={`Reset ${g.name}`}
+                      onClick={() => resetGroup(g)}
+                    >
+                      <ResetIcon />
+                    </button>
+                  </div>
 
-                    {open[g.key] ? (
-                      <div className="cr-grpbody" data-bypassed={params[g.toggle] ? undefined : 'true'}>
-                        {g.rows.map((row) => (
-                          <ParamRow
-                            key={row.key}
-                            row={row}
-                            value={params[row.key]}
-                            keyframed={Boolean(keyframes[row.key])}
-                            onToggleKeyframe={() => setKeyframes((k) => ({ ...k, [row.key]: !k[row.key] }))}
-                            onValue={(v) => set({ [row.key]: v } as Partial<ClipParams>)}
-                            onReset={() => {
-                              setKeyframes((k) => ({ ...k, [row.key]: false }));
-                              set({ [row.key]: DEFAULT_CLIP_PARAMS[row.key] } as Partial<ClipParams>);
-                            }}
-                          />
-                        ))}
-                        {g.key === 'speed' ? (
-                          <p className="cr-note">
-                            {params.speed === 100
-                              ? 'Unchanged.'
-                              : `${clip.range.duration} frames → ${scaleFrames(clip.range.duration, 100 / params.speed)} at ${rateLabel(rate)}.`}
-                          </p>
-                        ) : null}
-                      </div>
-                    ) : null}
-                  </section>
-                ))
-              )}
+                  {open[g.key] ? (
+                    <div className="cr-grpbody" data-bypassed={params[g.toggle] ? undefined : 'true'}>
+                      {g.rows.map((row) => (
+                        <ParamRow
+                          key={row.key}
+                          row={row}
+                          value={params[row.key]}
+                          keyframed={Boolean(keyframes[row.key])}
+                          onToggleKeyframe={() => setKeyframes((k) => ({ ...k, [row.key]: !k[row.key] }))}
+                          onValue={(v) => set({ [row.key]: v } as Partial<ClipParams>)}
+                          onReset={() => {
+                            setKeyframes((k) => ({ ...k, [row.key]: false }));
+                            set({ [row.key]: DEFAULT_CLIP_PARAMS[row.key] } as Partial<ClipParams>);
+                          }}
+                        />
+                      ))}
+                    </div>
+                  ) : null}
+                </section>
+              ))}
             </>
           )}
         </div>
@@ -380,39 +330,6 @@ function NumberField({
   );
 }
 
-/** What is actually on disk, so a missing-media surprise is visible early. */
-function FilePane({ clip, media, rate }: { clip: PlacedItem; media?: MediaRef | null; rate: Rate }) {
-  const item = isClip(clip.item) ? clip.item : null;
-  if (!item) return <div className="cr-inone"><span>This is a gap, not a clip.</span></div>;
-  const rows: [string, string][] = [
-    ['name', item.name],
-    ['media key', item.mediaKey],
-    ['source in', toTimecode(item.sourceRange.start, rate)],
-    ['source out', toTimecode(rangeEnd(item.sourceRange), rate)],
-    ['used', `${item.sourceRange.duration} frames`],
-    ['available', media ? `${media.available.duration} frames` : 'media not in the pool'],
-    [
-      'handles',
-      media
-        ? `${item.sourceRange.start - media.available.start} in · ${
-            rangeEnd(media.available) - rangeEnd(item.sourceRange)} out`
-        : '-',
-    ],
-    ['effects', item.effects.length ? item.effects.map((e) => e.kind).join(', ') : 'none'],
-    ['enabled', item.enabled ? 'yes' : 'no'],
-  ];
-  return (
-    <dl className="cr-file">
-      {rows.map(([k, v]) => (
-        <div key={k}>
-          <dt>{k}</dt>
-          <dd>{v}</dd>
-        </div>
-      ))}
-    </dl>
-  );
-}
-
 const ClipboardIcon = () => (
   <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor"
     strokeWidth={1.4} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -434,20 +351,6 @@ const CSS = `
   flex:1 1 auto;background:var(--panel);display:flex;flex-direction:column;
   min-height:0;min-width:0;font-family:var(--ui);height:100%;
 }
-/* 28px matches the viewer header and the browser tabs, so the three columns
-   share one top line rather than three */
-.cr-itabs{
-  display:flex;height:28px;flex:none;background:var(--head);
-  border-bottom:1px solid var(--edge);box-shadow:var(--lift);
-}
-.cr-itab{
-  flex:1;height:100%;min-width:0;padding:0 2px;font-size:11px;font-weight:600;
-  letter-spacing:.02em;color:var(--t2);border:0;border-bottom:2px solid transparent;
-  background:none;cursor:pointer;font-family:inherit;
-}
-.cr-itab+.cr-itab{box-shadow:inset 1px 0 0 var(--edge)}
-.cr-itab:hover{color:var(--t1)}
-.cr-itab[data-on]{color:var(--t1);border-bottom-color:var(--orange);background:var(--panel)}
 .cr-ibody{flex:1;overflow:auto;min-height:0}
 .cr-inone{
   min-height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;
@@ -532,14 +435,4 @@ const CSS = `
 }
 .cr-kf-diamond:hover{color:var(--orange);transform:scale(1.2)}
 .cr-kf-diamond.on{color:var(--orange)}
-.cr-note{
-  margin:6px 0 0;font-family:var(--mono);font-size:9.5px;color:var(--t3);line-height:1.5;
-}
-.cr-file{margin:0;padding:8px 10px;display:flex;flex-direction:column;gap:5px}
-.cr-file>div{display:flex;gap:8px;align-items:baseline}
-.cr-file dt{width:74px;flex:none;font-size:11px;color:var(--t3);text-align:right}
-.cr-file dd{
-  margin:0;flex:1;min-width:0;font-family:var(--mono);font-size:10.5px;color:var(--t1);
-  word-break:break-all;
-}
 `;

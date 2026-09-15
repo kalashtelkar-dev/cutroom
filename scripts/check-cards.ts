@@ -105,17 +105,27 @@ function bindingsUsed(value: unknown, into: Set<string> = new Set()): Set<string
 }
 
 const files = readdirSync(CARDS).filter((f) => f.endsWith('.md'));
-// A comparison of nothing passes: if the directory moves, say so rather than
-// reporting a clean run over zero cards.
-if (files.length < 5) {
-  console.error(`only ${files.length} cards in ${CARDS}, so this checked almost nothing`);
+/**
+ * A comparison of nothing passes, so this refuses to report a clean run over
+ * an empty directory.
+ *
+ * It used to refuse fewer than five, which was a proxy for "the directory
+ * moved" and stopped being true the moment eight cards were archived on
+ * purpose: a correct shelf failed the build. What it can honestly ask is
+ * whether it found anything and whether it then read everything it found,
+ * which is the question the threshold was standing in for.
+ */
+if (!files.length) {
+  console.error(`no cards in ${CARDS}, so this checked nothing. Has the directory moved?`);
   process.exit(1);
 }
 
 let pipelineSteps = 0;
+let cardsRead = 0;
 
 for (const file of files.sort()) {
   const card = parseCard(readFileSync(join(CARDS, file), 'utf8'), file.replace(/\.md$/, ''));
+  cardsRead += 1;
   /**
    * Every binding a card reads must be one the editor sets, and every file
    * port must read `$source`.
@@ -278,6 +288,13 @@ for (const file of files.sort()) {
 
 console.log(`\n${files.length} cards, ${pipelineSteps} pipeline step(s)\n`);
 for (const r of rows) console.log(r);
+
+// the other half of "a comparison of nothing passes": a card skipped by a
+// `continue` somewhere above would otherwise leave a clean run behind it
+if (cardsRead !== files.length) {
+  console.error(`\nread ${cardsRead} of ${files.length} cards, so some were never checked\n`);
+  process.exit(1);
+}
 
 if (problems.length) {
   console.log(`\n${problems.length} card(s) would fail when run:\n`);

@@ -9,7 +9,8 @@
  * lets the whole sequence, including its failures, be tested for free.
  */
 import { compile } from '../compiler/compile.ts';
-import { timelineSrt } from '../subtitles/place.ts';
+import { timelineSrt, captionText } from '../subtitles/place.ts';
+import { fontForCaptions } from '../subtitles/fonts.ts';
 import { calibrateFromRun, describeCalibration } from '../compiler/calibrate.ts';
 import { preflight } from '../editor-api/graph.ts';
 import type { Timeline } from '../timeline/types.ts';
@@ -76,6 +77,7 @@ export async function exportTimeline(
    * carries on without the burn and says so.
    */
   let subtitleKey: string | undefined;
+  let subtitleFont: { key: string; family: string; file: string } | undefined;
   if (opts.burnSubtitles) {
     const srt = timelineSrt(timeline);
     if (!srt.trim()) {
@@ -90,6 +92,63 @@ export async function exportTimeline(
         emit({ phase: 'compiling', message: `the caption file could not be uploaded: ${(e as Error).message}` });
       }
     }
+
+    /**
+     * The font, if the render container has no glyph for these words.
+     *
+     * Asked of the caption text rather than the SRT, because an SRT is
+     * mostly timestamps and index numbers and those are Latin digits: ask
+     * the file and every file looks fine. Latin cues need nothing, and
+     * skipping the attachment is a job not run.
+     *
+     * A font that will not upload costs the captions their glyphs and
+     * nothing else, so it is said out loud and the export carries on. The
+     * alternative is losing a render that is minutes long over a file the
+     * user can see is wrong the moment it finishes.
+     */
+    if (subtitleKey) {
+      const need = fontForCaptions(captionText(timeline));
+      if (need.font && transport.uploadFont) {
+        try {
+          const key = await transport.uploadFont(need.font);
+          subtitleFont = { key, family: need.font.family, file: need.font.file };
+          emit({
+            phase: 'compiling',
+            message: `${need.font.script} captions will be burned with ${need.font.family}`,
+            detail: key,
+          });
+        } catch (e) {
+          emit({
+            phase: 'compiling',
+            message: `${need.font.family} could not be uploaded, so ${need.font.script} captions will `
+              + `render as empty boxes: ${(e as Error).message}`,
+          });
+        }
+      } else if (need.font) {
+        emit({
+          phase: 'compiling',
+          message: `this transport cannot upload a font, so ${need.font.script} captions will render as empty boxes`,
+        });
+      }
+      if (need.missing.length) {
+        emit({
+          phase: 'compiling',
+          message: `no bundled font covers ${need.missing.join(', ')}, so those captions will render as `
+            + 'empty boxes. Add the font to public/fonts and an entry to lib/subtitles/fonts.ts.',
+        });
+      }
+      if (need.crowdedOut.length) {
+        // a font we have and cannot reach is a different problem from one we
+        // do not have, and telling someone to go and find a file that is
+        // already in the repo is how an afternoon gets lost
+        emit({
+          phase: 'compiling',
+          message: `a burn can name one font and these cues need more than one, so ${need.crowdedOut.join(', ')} `
+            + `will render as empty boxes while ${need.font?.script ?? 'the rest'} is drawn. `
+            + 'Splitting the languages across separate exports is the way out.',
+        });
+      }
+    }
   }
 
   // ── compile ──────────────────────────────────────────────────────────
@@ -99,6 +158,7 @@ export async function exportTimeline(
     burnSubtitles: opts.burnSubtitles,
     range: opts.range,
     ...(subtitleKey ? { subtitleKey } : {}),
+    ...(subtitleFont ? { subtitleFont } : {}),
   });
   emit({
     phase: 'compiling',

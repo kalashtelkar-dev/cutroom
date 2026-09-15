@@ -121,7 +121,7 @@ function Row({ r, other, ok, wb }: { r: CaseResult; other: CaseResult; ok: boole
           </button>
           {r.case.source !== 'seed' ? <span className="wbe-src">{r.case.source}</span> : null}
         </td>
-        <td className="mono dim">{r.case.expect}</td>
+        <td className="mono dim">{r.case.expect ?? 'nothing'}</td>
         <td className={`mono ${ok ? 'good' : 'bad'}`}>
           {r.got ?? 'declined'}
           <span className="wbe-rung">{r.rung === null ? '' : r.rung === r.case.rung ? `R${r.rung}` : `R${r.rung}, wanted R${r.case.rung}`}</span>

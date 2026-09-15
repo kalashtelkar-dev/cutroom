@@ -131,6 +131,21 @@ export interface ImportTransport {
    * proxy means no smooth playback and no sound, not a failed import.
    */
   proxy?(key: string, kind: MediaRef['kind'], seconds: number): Promise<string>;
+  /**
+   * How big a picture is, read from the file itself.
+   *
+   * An image never goes through `probe`, because it has no duration to ask
+   * for, so nothing used to measure one and `width`/`height` came out
+   * undefined. That is not cosmetic: the compiler fits an upper track to the
+   * box its own pictures occupy, and a picture with no size has to be fitted
+   * to the delivery frame instead, which pads it with black bars and lays
+   * them over the track below. The browser already holds the bytes, so this
+   * is exact and costs nothing.
+   *
+   * Optional, and allowed to answer null: a file the browser cannot decode is
+   * still importable and still cuts.
+   */
+  measure?(file: File): Promise<{ width: number; height: number } | null>;
   /** Returns once the bytes are in storage. `onProgress` is 0..1. */
   put(url: string, file: File, onProgress: (p: number) => void): Promise<void>;
   probe(key: string): Promise<unknown>;
@@ -156,6 +171,19 @@ export async function importFile(
   if (kind === 'image') {
     seconds = STILL_SECONDS;
     job.log(`a still, so it gets ${STILL_SECONDS}s to cut against`);
+    if (transport.measure) {
+      try {
+        const size = await transport.measure(file);
+        if (size) {
+          dims = { width: size.width, height: size.height };
+          job.log(`measured: ${size.width}x${size.height}`);
+        } else {
+          job.log('the browser could not measure this picture, so it will be fitted to the delivery frame', 'warn');
+        }
+      } catch (e) {
+        job.log(`not measured: ${(e as Error).message}`, 'warn');
+      }
+    }
   } else {
     const probe = await transport.probe(signed.key);
     seconds = probeSeconds(probe);
@@ -361,6 +389,23 @@ export function browserTransport(): ImportTransport {
           );
         }
         await new Promise((r) => setTimeout(r, 1200));
+      }
+    },
+
+    async measure(file) {
+      /**
+       * `createImageBitmap` and not an `Image` with a data URL: it decodes the
+       * bytes we already have, reports the intrinsic size, and is the same
+       * number for a file the tag would refuse to lay out.
+       */
+      if (typeof createImageBitmap !== 'function') return null;
+      const bitmap = await createImageBitmap(file);
+      try {
+        return bitmap.width > 0 && bitmap.height > 0
+          ? { width: bitmap.width, height: bitmap.height }
+          : null;
+      } finally {
+        bitmap.close();
       }
     },
 

@@ -444,7 +444,7 @@ function RateBar({ run, wb }: { run: Run; wb: WorkbenchStore }) {
     const ok = already.expect === got;
     return (
       <div className="wbb-rate">
-        <span className="q">Already a case, expecting <b>{already.expect}</b></span>
+        <span className="q">Already a case, expecting <b>{already.expect ?? 'nothing'}</b></span>
         <span className="wb-grow" />
         <span className={ok ? 'wbb-ok' : 'wbb-bad'}>{ok ? 'passing' : `failing, it routes to ${got ?? 'nothing'}`}</span>
       </div>

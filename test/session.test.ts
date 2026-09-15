@@ -9,7 +9,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { RATES, frames, timeRange } from '../lib/time/frames.ts';
+import { RATES, frames, timeRange, type Rate } from '../lib/time/frames.ts';
 import { emptyTimeline } from '../lib/timeline/document.ts';
 import { applyEdits } from '../lib/timeline/edits.ts';
 import type { MediaRef, Timeline } from '../lib/timeline/types.ts';
@@ -17,6 +17,8 @@ import {
   SESSION_KEY, SESSION_VERSION, SessionError, browserSession, clearSession, fromSnapshot,
   readSession, toSnapshot, writeSession, type SessionState, type SessionStore,
 } from '../lib/project/session.ts';
+import { openProject, type ProjectTransport } from '../lib/project/store.ts';
+import { toOtio } from '../lib/timeline/otio.ts';
 
 const R = RATES.film;
 const f = frames;
@@ -194,5 +196,69 @@ describe('session storage', () => {
   test('no localStorage means no session store, not a crash', () => {
     const had = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
     assert.equal(browserSession(), had ? browserSession() : null);
+  });
+});
+
+// ── the rate a project opens at ─────────────────────────────────────────
+// `fromOtio` rescales every position into the rate it is handed, so a rate
+// passed to a reader is a conform and not a default. Every reader defaulted
+// to 24fps, which is how the frame rate in the new project dialog came to be
+// a control that did nothing: a project made at 30 was saved at 30, reopened
+// at 24, and the number in the corner said 24.
+
+describe('a project opens at the rate it was made at', () => {
+  const at = (rate: Rate): Timeline => {
+    const empty = emptyTimeline('tl_r', 'Thirty', rate);
+    const { timeline } = applyEdits(empty, [
+      { op: 'add_media', media: { ...rich('input/a.mp4'), rate } },
+      {
+        op: 'add_clip',
+        trackId: 'trk_v1',
+        at: f(0),
+        clip: {
+          id: 'clp_a', kind: 'clip', name: 'a', mediaKey: 'input/a.mp4',
+          sourceRange: timeRange(f(30), f(90)), enabled: true, effects: [],
+        },
+      },
+    ]);
+    return timeline;
+  };
+
+  /** A transport that hands back exactly what was put into it. */
+  const shelf = (doc: Timeline): ProjectTransport => {
+    const otio = JSON.parse(JSON.stringify(toOtio(doc)));
+    const saved = { id: doc.id, name: doc.name, etag: 'tag_1', revision: 1 };
+    return {
+      list: async () => [{ ...saved, trackCount: doc.tracks.length, clipCount: 1, durationSec: 0 }],
+      create: async () => saved,
+      get: async () => ({ project: saved, otio }),
+      put: async () => saved,
+      delete: async () => {},
+      rename: async () => saved,
+      duplicate: async () => saved,
+    };
+  };
+
+  test('a 30fps cut comes back at 30, with its positions where they were', async () => {
+    const made = at(RATES.web);
+    const r = await openProject('tl_r', shelf(made));
+    assert.deepEqual(r.timeline.rate, RATES.web, '24fps here is the bug this is for');
+    const clip = r.timeline.tracks.find((t) => t.id === 'trk_v1')?.items[0];
+    assert.ok(clip && clip.kind === 'clip');
+    assert.deepEqual(clip.sourceRange, timeRange(f(30), f(90)),
+      'conforming 30fps to 24 moves every frame position, silently',
+    );
+  });
+
+  test('the exact rationals survive, so 23.976 is not 24', async () => {
+    const r = await openProject('tl_r', shelf(at(RATES.ntscFilm)));
+    assert.deepEqual(r.timeline.rate, RATES.ntscFilm);
+  });
+
+  test('a caller that states a rate still gets the conform it asked for', async () => {
+    // the parameter is not dead: it is how a document at another rate is
+    // brought into a project already running at this one
+    const r = await openProject('tl_r', shelf(at(RATES.web)), RATES.film);
+    assert.deepEqual(r.timeline.rate, RATES.film);
   });
 });

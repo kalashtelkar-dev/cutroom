@@ -20,7 +20,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { RunCard } from './RunCard.tsx';
 import { ToolRunCard, type ToolRunArgs } from './ToolRunCard.tsx';
 import type { Tool } from '../rail/tools.ts';
-import { getCard } from '@/lib/intel/index.ts';
+import { allCards } from '@/lib/intel/index.ts';
 import type { Step } from '@/lib/intel/index.ts';
 import type { Plan, PlanProblem } from '@/lib/router/plan.ts';
 import type { RunState } from '@/lib/executor/types.ts';
@@ -67,13 +67,29 @@ type Entry = EntryBody & { id: number };
  * The chips are the cards' own quoted examples, not a hand-written list.
  * A suggestion that does not route is worse than no suggestion, and the only
  * phrases guaranteed to route are the ones the cards claim.
+ *
+ * Read off the cards in play rather than a list of ids, which is what the
+ * paragraph above always claimed and was not quite true: the ids were named
+ * here, so archiving those cards left four chips that silently resolved to
+ * nothing and a row that rendered empty. Taking whatever is on the shelf
+ * means the row follows the cards without anyone remembering to come here.
+ *
+ * Two per card before a second from any, so one talkative card cannot fill
+ * the row while another goes unmentioned.
  */
+const CHIP_LIMIT = 4;
+
 function exampleChips(): string[] {
-  const wanted = ['auto-broll-weave', 'tighten-cut', 'timeline-punch', 'timeline-blade'];
-  return wanted
-    .map((id) => getCard(id)?.examples[0])
-    .filter((s): s is string => !!s)
-    .map((s) => s.charAt(0).toUpperCase() + s.slice(1));
+  const cards = allCards();
+  const out: string[] = [];
+  for (let round = 0; round < 2; round++) {
+    for (const card of cards) {
+      const example = card.examples[round];
+      if (!example || out.length >= CHIP_LIMIT) continue;
+      out.push(example.charAt(0).toUpperCase() + example.slice(1));
+    }
+  }
+  return out;
 }
 
 export function Assistant({

@@ -21,13 +21,17 @@
     "prove:media": "node scripts/prove-media.mjs",
     "pipeline": "node --experimental-strip-types scripts/make-pipeline.ts",
     "prove:session": "node scripts/prove-session.mjs",
+    "prove:import-drop": "node --experimental-strip-types scripts/prove-import-drop.ts",
     "prove:selection": "node --experimental-strip-types scripts/prove-selection.ts",
     "prove:concat": "node --experimental-strip-types scripts/prove-concat.ts",
     "prove:layers": "node --experimental-strip-types scripts/prove-layers.ts",
     "cards": "node --experimental-strip-types scripts/check-cards.ts",
     "prove:captions": "node --experimental-strip-types scripts/prove-captions.ts",
+    "prove:caption-font": "node --experimental-strip-types scripts/prove-caption-font.ts",
     "prove:caption-edit": "node --experimental-strip-types scripts/prove-caption-edit.ts",
-    "prove:caption-playback": "node --experimental-strip-types scripts/prove-caption-playback.ts"
+    "prove:caption-playback": "node --experimental-strip-types scripts/prove-caption-playback.ts",
+    "check:delivery": "node --experimental-strip-types scripts/check-delivery.ts",
+    "prove:vertical": "node --experimental-strip-types scripts/prove-vertical.ts"
   },
   "dependencies": {
     "next": "16.3.5",

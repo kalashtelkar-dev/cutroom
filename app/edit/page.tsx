@@ -10,6 +10,7 @@ import { getTemplate } from '@/lib/timeline/templates.ts';
 import { NewProjectDialog } from '@/components/shell/NewProjectDialog.tsx';
 import { importFile, browserTransport } from '@/lib/media/import.ts';
 import { saveProject, openProject, browserProjects, StaleProjectError, type SavedProject, type ProjectSummary } from '@/lib/project/store.ts';
+import { AUTOSAVE_MS, shouldAutosave, saveLabel, type SaveStatus } from '@/lib/project/autosave.ts';
 import {
   browserSession, readSession, writeSession, type SessionStore,
 } from '@/lib/project/session.ts';
@@ -25,7 +26,8 @@ import { findClip, isClip, itemAt, placeTrack } from '@/lib/timeline/document.ts
 import { bladeOps, rippleDeleteOps } from '@/components/timeline/interactions.ts';
 import type { EditOp, Timeline as TimelineDoc, ClipId } from '@/lib/timeline/types.ts';
 import { frames, toTimecode, rateLabel, rangeEnd, type Frames } from '@/lib/time/frames.ts';
-import { MenuBar, useCommandShortcuts } from '@/components/menu/MenuBar.tsx';
+import { useCommandShortcuts } from '@/components/menu/useCommandShortcuts.ts';
+import { ShortcutsSheet } from '@/components/menu/ShortcutsSheet.tsx';
 import { buildCommands, type Actions } from '@/lib/commands/registry.ts';
 import type { CommandContext } from '@/lib/commands/types.ts';
 import { matchShortcut, shouldHandle } from '@/lib/commands/shortcuts.ts';
@@ -34,9 +36,11 @@ import { JobsPanel } from '@/components/jobs/JobsPanel.tsx';
 import { Workbench } from '@/components/workbench/Workbench.tsx';
 import { PlayheadController } from '@/components/timeline/Playhead.tsx';
 import { ExportDialog, DEFAULT_EXPORT, toDelivery, type ExportSettings } from '@/components/export/ExportDialog.tsx';
+import { videoBitrateFor } from '@/lib/export/targets.ts';
+import { saveLocalProject } from '@/lib/project/localStore.ts';
 import { runExport } from '@/lib/export/client.ts';
 import type { ExportEvent, ExportResult } from '@/lib/export/types.ts';
-import { timelineDuration } from '@/lib/timeline/document.ts';
+import { programmeDuration, timelineDuration } from '@/lib/timeline/document.ts';
 import { paramsToEffects, effectsToParams, unrenderable } from '@/lib/inspector/effects.ts';
 import type { ClipParams } from '@/components/inspector/types.ts';
 import { useWorkbenchHotkey } from '@/components/workbench/useWorkbench.ts';
@@ -45,7 +49,6 @@ import { browserTransport as executorBrowserTransport } from '@/lib/executor/bro
 import { reconcileOutputs } from '@/lib/timeline/reconcile.ts';
 import { applyEvent, initialRun, type FoldedRun } from '@/lib/executor/fold.ts';
 import { resolveToolSource, isRefusal } from '@/lib/tools/source.ts';
-import { readBrollPlan, brollMarkerOps, brollSummary } from '@/lib/tools/broll-plan.ts';
 import type { RunState, ExecutorEvent } from '@/lib/executor/types.ts';
 import type { Plan } from '@/lib/router/plan.ts';
 import { toolTier } from '@/components/rail/tools.ts';
@@ -90,6 +93,16 @@ export default function EditorPage() {
   const [revisions, setRevisions] = useState<{ id: string; name: string; list: Array<{ revision: number; createdAt?: string; name?: string }> } | null>(null);
   const [dirty, setDirty] = useState(false);
   const [jobsOpen, setJobsOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>('saved');
+  /**
+   * Whether a write is in flight, as a ref and not as state.
+   *
+   * The effect re-runs on every edit, and state read in the tick it was set
+   * is the value from the last render: two autosaves would start, race, and
+   * leave the etag matching neither.
+   */
+  const saving = useRef(false);
   /** The media key the remove dialog is asking about. */
   const [removing, setRemoving] = useState<string | null>(null);
   /** The workbench is an overlay over the cut, opened like devtools. */
@@ -330,6 +343,29 @@ export default function EditorPage() {
 
     const store = browserSession();
     sessionRef.current = store;
+
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      const projectId = params.get('project');
+      if (projectId) {
+        void (async () => {
+          try {
+            // no rate: the project opens at the one it was made at
+            const r = await openProject(projectId, browserProjects());
+            setSaved(r.project);
+            setDoc(r.timeline);
+            setPipelineId(r.timeline.exportPipelineId ?? null);
+            setDirty(false);
+            setPlayhead(frames(0));
+            note(`Opened ${r.project.name}`);
+          } catch (err) {
+            note(`Could not open project: ${(err as Error).message}`);
+          }
+        })();
+        return;
+      }
+    }
+
     if (!store) return;   // private mode, or storage switched off. Not an error.
 
     const r = readSession(store, RATES.film);
@@ -424,6 +460,57 @@ export default function EditorPage() {
    * whether it succeeds or not. A list missing its failures is worse than no
    * list at all.
    */
+  /**
+   * Autosave.
+   *
+   * Save and Save As were File menu items and the File menu is gone, so the
+   * project keeps itself: every edit sets `dirty`, and once the document has
+   * sat still for `AUTOSAVE_MS` it is written.
+   *
+   * Not through `runAsJob`, which the manual save still uses. A job per
+   * autosave would put one row in the log for every couple of seconds of
+   * editing and bury the runs that are actually worth reading. Failures are
+   * still said out loud; it is silence on success that is wanted, not
+   * silence.
+   */
+  useEffect(() => {
+    if (!shouldAutosave({ dirty, saving: saving.current, status: saveStatus })) return;
+
+    const timer = setTimeout(() => {
+      saving.current = true;
+      setSaveStatus('saving');
+      void (async () => {
+        try {
+          const r = await saveProject(doc, saved, browserProjects());
+          setSaved(r.project);
+          setDoc(r.timeline);
+          setDirty(false);
+          setSaveStatus('saved');
+        } catch (e) {
+          if (e instanceof StaleProjectError) {
+            // and no retry: see lib/project/autosave.ts. A loop here
+            // overwrites whoever moved first, every two seconds.
+            setSaveStatus('conflict');
+            note('Someone else changed this project. Reopen it and reapply.');
+          } else {
+            setSaveStatus('failed');
+            note(`Could not save: ${(e as Error).message}`);
+          }
+        } finally {
+          saving.current = false;
+        }
+      })();
+    }, AUTOSAVE_MS);
+
+    return () => clearTimeout(timer);
+    // `doc` is in here on purpose. Every edit replaces it, which cancels the
+    // pending timer and starts a new one, so the write happens once the
+    // document has stopped moving and writes the document as it is then. Keep
+    // it out and the timer set by the first keystroke fires two seconds later
+    // holding the document from the first keystroke, and clears `dirty` for
+    // everything typed since.
+  }, [dirty, doc, saved, saveStatus, note]);
+
   const actions: Actions = useMemo(() => ({
     edit: commit,
     undo: () => step('undo'),
@@ -492,6 +579,15 @@ export default function EditorPage() {
       setExportResult(null);
       setExportError(null);
       setExportProgress(null);
+      if (doc.width && doc.height) {
+        setExportSettings((prev) => ({
+          ...prev,
+          width: doc.width ?? prev.width,
+          height: doc.height ?? prev.height,
+          target: doc.targetId ?? prev.target,
+          videoBitrate: videoBitrateFor(doc.height ?? prev.height, prev.quality ?? 'standard'),
+        }));
+      }
       setExportOpen(true);
     },
     toggleSnapping: () => setSnapping((v) => !v),
@@ -542,6 +638,7 @@ export default function EditorPage() {
     zoomOut: () => { if (tlControls) tlControls.zoomOut(); else note('The timeline is not ready yet'); },
     openWorkbench: () => setBenchOpen(true),
     openJobs: () => setJobsOpen(true),
+    showShortcuts: () => setShortcutsOpen(true),
     selectAll: () => { if (tlControls) tlControls.selectAll(); else note('The timeline is not ready yet'); },
     notify: note,
   }), [commit, step, doc, jobs, note, saved, tlControls, clock, selection]);
@@ -731,7 +828,10 @@ export default function EditorPage() {
   const openById = useCallback(async (id: string) => {
     setProjects(null);
     await runAsJob(jobs, 'open', 'Open project', async (job) => {
-      const r = await openProject(id, browserProjects(), doc.rate);
+      // not `doc.rate`: opening a project is not conforming it to whatever
+      // happens to be on screen, and a 30fps cut opened from a 24fps one came
+      // back with every position rescaled
+      const r = await openProject(id, browserProjects());
       job.log(`${r.timeline.tracks.length} tracks, revision ${r.project.revision}`);
       setSaved(r.project);
       setDoc(r.timeline);
@@ -743,7 +843,7 @@ export default function EditorPage() {
       note(`Opened ${r.project.name}`);
       return r.project;
     });
-  }, [jobs, doc.rate, history, syncStack, note]);
+  }, [jobs, history, syncStack, note]);
 
   const refreshProjects = useCallback(async () => {
     try {
@@ -834,9 +934,6 @@ export default function EditorPage() {
           pipelineId: pipelineId ?? doc.exportPipelineId ?? null,
           name: doc.name,
           burnSubtitles: exportSettings.burnSubtitles,
-          range: exportSettings.rangeMode === 'custom' && exportSettings.rangeDuration
-            ? { start: exportSettings.rangeStart ?? 0, duration: exportSettings.rangeDuration }
-            : undefined,
         },
         (e) => {
           setExportProgress(e);
@@ -863,50 +960,17 @@ export default function EditorPage() {
   /**
    * A rung 1 tool: a local patch, applied now.
    *
-   * These three are the only tools that touch nothing but the document, which
-   * is why they can run at all. Everything above rung 1 needs the executor
-   * and a published pipeline, and `runTool` says so rather than pretending.
+   * Nothing on the rail is rung 1 at the moment. The three that were, blade,
+   * ripple delete and punch in, went with their cards, and blade and ripple
+   * are still on the Clip menu and their keys: they are editing, not tool
+   * calling, and the rail was only ever a second way to reach them.
+   *
+   * This stays because it is the seam a rung 1 card arrives through, and it
+   * says so rather than doing nothing quietly.
    */
   const runLocalTool = useCallback((tool: Tool) => {
-    const at = clock.get();
-
-    if (tool.id === 'timeline-blade') {
-      // every unlocked track the playhead is over, which is what a blade does
-      const ops: EditOp[] = [];
-      for (const track of doc.tracks) {
-        if (track.locked || !track.autoSelect) continue;
-        const placed = itemAt(track, at);
-        if (!placed || !isClip(placed.item)) continue;
-        if (at <= placed.range.start || at >= rangeEnd(placed.range)) continue;
-        ops.push(...bladeOps(placed, at, `clp_${Math.random().toString(36).slice(2, 10)}`));
-      }
-      if (!ops.length) { note('Nothing under the playhead to cut'); return; }
-      commit(ops, 'Blade');
-      note(`Cut ${ops.length / 2} clip${ops.length === 2 ? '' : 's'}`);
-      return;
-    }
-
-    if (tool.id === 'timeline-ripple') {
-      const first = [...selection][0];
-      const placed = first ? findClip(doc, first) : null;
-      if (!placed) { note('Select a clip to ripple delete'); return; }
-      commit(rippleDeleteOps(doc, placed), 'Ripple delete');
-      setSelection(new Set());
-      return;
-    }
-
-    if (tool.id === 'timeline-punch') {
-      const first = [...selection][0];
-      const placed = first ? findClip(doc, first) : null;
-      if (!placed || !isClip(placed.item)) { note('Select a clip to punch in on'); return; }
-      // The card asks for scale 1.18, and there is no scale operation in the
-      // catalogue. Saying so beats writing an effect the render drops.
-      note('Punch in needs a scale operation, which the editor API does not have');
-      return;
-    }
-
     note(`${tool.name} has no local implementation yet`);
-  }, [clock, doc, selection, commit, note]);
+  }, [note]);
 
   /**
    * Run a plan from the assistant.
@@ -919,11 +983,15 @@ export default function EditorPage() {
    * What a finished pipeline run actually produced, put where it can be seen.
    *
    * A run that ends with a note saying "completed" and nothing on the
-   * timeline has not delivered anything. `broll-b1` hands back JSON, so its
-   * cutaways land as markers against the clip the pipeline read, which is why
-   * the media key travels with the plan: the plan counts in the SOURCE
-   * file's seconds and only that clip knows where those seconds sit on the
-   * timeline. Returns the line to show, or null to leave the default.
+   * timeline has not delivered anything. Subtitles are the one card in play,
+   * so cues are what this places.
+   *
+   * The media key still travels with the plan, and it is not spare: a
+   * pipeline reads ONE file and answers in that file's own seconds, so
+   * anything that lands times on the timeline needs to know which clip they
+   * were measured against. That was the whole of the arithmetic in the
+   * archived b-roll placement, and the next thing to return timings will
+   * need it again. Returns the line to show, or null to leave the default.
    */
   const placePlanResult = useCallback(async (
     runIds: string[],
@@ -1012,21 +1080,6 @@ export default function EditorPage() {
         }
       }
 
-      const plan = readBrollPlan(output.broll_plan);
-      if (!plan) continue;
-
-      // the clip the pipeline read, which is the one that can place its times
-      const clip = clipForMedia(mediaKey);
-      if (!clip) {
-        return `${title}: planned ${plan.broll.length}, but the clip it read is no longer on the timeline`;
-      }
-
-      const stamp = Date.now().toString(36);
-      const { ops, placed, outside } = brollMarkerOps(
-        plan, clip, doc.rate, (i) => `mrk_${stamp}_${i}`,
-      );
-      if (ops.length) commit(ops, `${title}: ${placed} marker${placed === 1 ? '' : 's'}`);
-      return `${title}: ${brollSummary(plan, placed, outside)}`;
     }
     return null;
   }, [doc, commit]);
@@ -1280,14 +1333,27 @@ export default function EditorPage() {
     }, extra);
   }, [executePlan, note, doc, selectedPlaced, checkMedia]);
 
+  const navigateToProjects = useCallback(() => {
+    const store = sessionRef.current;
+    if (store) {
+      writeSession(store, {
+        timeline: doc,
+        project: saved,
+        dirty,
+        pipelineId,
+        playhead: clock.get(),
+      });
+    }
+    try {
+      saveLocalProject(doc, saved);
+    } catch {
+      // ignore
+    }
+    window.location.href = '/';
+  }, [doc, saved, dirty, pipelineId, clock]);
+
   return (
     <>
-      <MenuBar
-        commands={commands}
-        context={cmdContext}
-        projectName={doc.name}
-        dirty={dirty}
-      />
       <input
         id="cr-import-input"
         type="file"
@@ -1309,6 +1375,7 @@ export default function EditorPage() {
         busy={busy}
         onSeek={(at) => clock.seek(at)}
         controller={clock}
+        onNavigateProjects={navigateToProjects}
         onRunLocalTool={runLocalTool}
         onRunTool={runTool}
         onRunPlan={executePlan}
@@ -1319,6 +1386,13 @@ export default function EditorPage() {
         historyDepth={{ undo: stack.undo.length, redo: stack.redo.length }}
         onNotify={note}
         onOpenWorkbench={() => setBenchOpen(true)}
+        // the same three things the File menu and the keys do, so there is
+        // one implementation of each and the button cannot drift from Cmd+E
+        onExport={actions.exportVideo}
+        onPickFiles={actions.importMedia}
+        onOpenJobs={() => setJobsOpen(true)}
+        saveState={saveLabel(saveStatus)}
+        onImportFiles={(files) => { void importFiles(files); }}
         clipParams={clipParams}
         onClipParamsChange={onClipParams}
         onRemoveMedia={setRemoving}
@@ -1340,8 +1414,15 @@ export default function EditorPage() {
           onSnappingChange={setSnapping}
           onControls={setTlControls}
           linked={linked}
+          onLinkedChange={setLinked}
+          onShowShortcuts={() => setShortcutsOpen(true)}
         />
       </Shell>
+      <ShortcutsSheet
+        open={shortcutsOpen}
+        commands={commands}
+        onClose={() => setShortcutsOpen(false)}
+      />
       {projects ? (
         <div className="cr-open" role="dialog" aria-modal="true" aria-label="Open project">
           <div className="cr-open-box">
@@ -1514,10 +1595,15 @@ export default function EditorPage() {
       <NewProjectDialog
         open={newProjectOpen}
         onClose={() => setNewProjectOpen(false)}
-        onCreate={(name, rate, templateId) => {
-          const newDoc = emptyTimeline(`tl_${Date.now().toString(36)}`, name, rate, templateId);
-          setDoc(newDoc);
-          setSaved(null);
+        onCreate={(name, rate, templateId, target) => {
+          const newDoc = emptyTimeline(`tl_${Date.now().toString(36)}`, name, rate, templateId, {
+            targetId: target.targetId,
+            width: target.width,
+            height: target.height,
+          });
+          const localSaved = saveLocalProject(newDoc, null);
+          setDoc(localSaved.timeline);
+          setSaved(localSaved.project);
           setDirty(false);
           setPlayhead(frames(0));
           note(`Created project with ${getTemplate(templateId).name} layout`);
@@ -1529,7 +1615,7 @@ export default function EditorPage() {
         open={exportOpen}
         projectName={doc.name}
         clipCount={doc.tracks.reduce((n, t) => n + t.items.filter((i) => i.kind === 'clip').length, 0)}
-        durationLabel={`${toTimecode(timelineDuration(doc), doc.rate)} at ${rateLabel(doc.rate)}`}
+        durationLabel={`${toTimecode(programmeDuration(doc), doc.rate)} at ${rateLabel(doc.rate)}`}
         settings={exportSettings}
         onSettings={setExportSettings}
         progress={exportProgress}

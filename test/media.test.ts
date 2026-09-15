@@ -101,6 +101,35 @@ describe('importing a file', () => {
     assert.equal(r.media.available.duration, STILL_SECONDS * 24);
   });
 
+  /**
+   * A still never goes through the probe, so nothing used to measure one and
+   * `width`/`height` came out undefined. That is not cosmetic: the compiler
+   * builds a track that sits over another one at the box its own pictures
+   * occupy, and a picture with no size has to be fitted to the delivery frame
+   * instead, which pads it with black bars and lays them over the track
+   * below. See `trackShape` in lib/compiler/compile.ts.
+   */
+  test('a still is measured, so the compiler knows what shape to build it at', async () => {
+    const job = store.start('import', 'x');
+    const r = await importFile(fakeFile('plate.png', 'image/png'), rate,
+      transport({ measure: async () => ({ width: 1500, height: 1500 }) }), job);
+    assert.equal(r.media.width, 1500);
+    assert.equal(r.media.height, 1500);
+    assert.equal(r.probe.width, 1500, 'and the log says what it measured');
+  });
+
+  test('a picture the browser cannot decode is still imported, without a size', async () => {
+    const job = store.start('import', 'x');
+    const r = await importFile(fakeFile('plate.png', 'image/png'), rate,
+      transport({ measure: async () => { throw new Error('unsupported'); } }), job);
+    assert.equal(r.media.key, 'input/plate.png');
+    assert.equal(r.media.width, undefined);
+    assert.ok(
+      store.get(job.id)!.log.some((e) => /not measured/.test(e.message)),
+      'and the reason is in the log rather than nowhere',
+    );
+  });
+
   test('an unprobeable file fails loudly instead of arriving with a fake length', async () => {
     const job = store.start('import', 'x');
     await assert.rejects(

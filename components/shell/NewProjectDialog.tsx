@@ -3,17 +3,24 @@
 /**
  * New project dialog.
  *
- * Lets the user name a project, pick a frame rate, and choose a track layout
- * template before creating the empty timeline document.
+ * Lets the user name a project, pick a frame rate, choose where the video is going
+ * (destination format and resolution), and select a track layout template.
  */
 import { useState } from 'react';
 import { RATES, type Rate } from '@/lib/time/frames.ts';
 import { PROJECT_TEMPLATES, type ProjectTemplate } from '@/lib/timeline/templates.ts';
+import { TARGETS, type ExportTarget } from '@/lib/export/targets.ts';
+
+export interface TargetChoice {
+  targetId: string;
+  width: number;
+  height: number;
+}
 
 export interface NewProjectDialogProps {
   open: boolean;
   onClose: () => void;
-  onCreate: (name: string, rate: Rate, templateId: string) => void;
+  onCreate: (name: string, rate: Rate, templateId: string, target: TargetChoice) => void;
 }
 
 const RATE_OPTIONS: { label: string; rate: Rate }[] = [
@@ -25,16 +32,49 @@ const RATE_OPTIONS: { label: string; rate: Rate }[] = [
   { label: '60 fps (High frame rate)', rate: RATES.high },
 ];
 
+function ShapeMark({ target }: { target: ExportTarget }) {
+  const long = 16;
+  const w = target.width >= target.height ? long : Math.round((target.width / target.height) * long);
+  const h = target.height >= target.width ? long : Math.round((target.height / target.width) * long);
+  return (
+    <span
+      style={{
+        width: 18,
+        height: 18,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        flexShrink: 0,
+      }}
+      aria-hidden="true"
+    >
+      <i
+        style={{
+          display: 'block',
+          width: w,
+          height: h,
+          border: '1.5px solid currentColor',
+          borderRadius: 1.5,
+          opacity: 0.8,
+        }}
+      />
+    </span>
+  );
+}
+
 export function NewProjectDialog({ open, onClose, onCreate }: NewProjectDialogProps) {
   const [name, setName] = useState('Untitled');
   const [rateIdx, setRateIdx] = useState(0);
   const [templateId, setTemplateId] = useState('standard');
+  const [targetId, setTargetId] = useState('youtube');
 
   if (!open) return null;
 
+  const chosenTarget = TARGETS.find((t) => t.id === targetId) ?? TARGETS[0];
+
   return (
     <div className="cr-open" role="dialog" aria-modal="true" aria-labelledby="cr-new-proj-title">
-      <div className="cr-open-box" style={{ maxWidth: 460 }}>
+      <div className="cr-open-box" style={{ maxWidth: 540, maxHeight: '90vh', display: 'flex', flexDirection: 'column' }}>
         <header className="cr-open-head">
           <h2 id="cr-new-proj-title" style={{ fontSize: 13, fontWeight: 600 }}>New project</h2>
           <button type="button" className="cr-open-x" onClick={onClose} aria-label="Close">✕</button>
@@ -43,10 +83,14 @@ export function NewProjectDialog({ open, onClose, onCreate }: NewProjectDialogPr
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            onCreate(name.trim() || 'Untitled', RATE_OPTIONS[rateIdx].rate, templateId);
+            onCreate(name.trim() || 'Untitled', RATE_OPTIONS[rateIdx].rate, templateId, {
+              targetId: chosenTarget.id,
+              width: chosenTarget.width,
+              height: chosenTarget.height,
+            });
             onClose();
           }}
-          style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 14 }}
+          style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 14, overflowY: 'auto' }}
         >
           <div>
             <label
@@ -72,6 +116,46 @@ export function NewProjectDialog({ open, onClose, onCreate }: NewProjectDialogPr
               }}
               autoFocus
             />
+          </div>
+
+          <div>
+            <span style={{ display: 'block', fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--t3)', marginBottom: 6 }}>
+              WHERE IS IT GOING?
+            </span>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 6 }}>
+              {TARGETS.map((t) => {
+                const checked = targetId === t.id;
+                return (
+                  <button
+                    key={t.id}
+                    type="button"
+                    onClick={() => setTargetId(t.id)}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8,
+                      padding: '8px 10px',
+                      borderRadius: 5,
+                      border: `1px solid ${checked ? 'var(--orange)' : 'var(--edge-soft)'}`,
+                      background: checked ? 'color-mix(in srgb, var(--orange) 10%, var(--panel))' : 'var(--app)',
+                      color: checked ? 'var(--t1)' : 'var(--t2)',
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                      fontFamily: 'inherit',
+                    }}
+                  >
+                    <ShapeMark target={t} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <span style={{ display: 'block', fontSize: 11.5, fontWeight: 600, color: 'var(--t1)' }}>{t.name}</span>
+                      <span style={{ display: 'block', fontSize: 10, color: 'var(--t3)', marginTop: 1 }}>{t.note}</span>
+                    </div>
+                    <span style={{ fontFamily: 'var(--mono)', fontSize: 9.5, color: 'var(--t3)', flexShrink: 0 }}>
+                      {t.width}x{t.height}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
           </div>
 
           <div>
@@ -131,7 +215,7 @@ export function NewProjectDialog({ open, onClose, onCreate }: NewProjectDialogPr
                       value={tpl.id}
                       checked={checked}
                       onChange={() => setTemplateId(tpl.id)}
-                      style={{ marginTop: 2 }}
+                      style={{ marginTop: 2, accentColor: 'var(--orange)' }}
                     />
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                       <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--t1)' }}>{tpl.name}</span>

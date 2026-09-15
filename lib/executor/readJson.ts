@@ -2,9 +2,10 @@
  * Reading a JSON file a pipeline produced.
  *
  * A pipeline hands back object keys, not data. `whisperx/subtitle` writes a
- * `transcript.json` carrying `{segments, word_segments, language}`, which is
- * exactly the sentence timing `tighten-cut` needs, and the only way to that
- * data is to sign the key and fetch it. Without this, a plan can start a
+ * `transcript.json` carrying `{segments, word_segments, language}`, and the
+ * only way to that data is to sign the key and fetch it. A port is a wire
+ * inside a graph, so `segments` is not in the run's reply however much it
+ * looks like a field. Without this, a plan can start a
  * transcription and then has nothing to think with.
  *
  * Deliberately its own step kind rather than a flag on `pipeline`. It is a

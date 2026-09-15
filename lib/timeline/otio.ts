@@ -313,6 +313,9 @@ export function toOtio(timeline: Timeline): OtioTimeline {
         rate: { num: rate.num, den: rate.den },
         ...(timeline.etag === undefined ? {} : { etag: timeline.etag }),
         ...(timeline.exportPipelineId ? { exportPipelineId: timeline.exportPipelineId } : {}),
+        ...(timeline.targetId ? { targetId: timeline.targetId } : {}),
+        ...(typeof timeline.width === 'number' ? { width: timeline.width } : {}),
+        ...(typeof timeline.height === 'number' ? { height: timeline.height } : {}),
         media,
       },
     },
@@ -564,6 +567,9 @@ export function fromOtio(doc: unknown, projectRate: Rate): Timeline {
     revision: typeof meta.revision === 'number' ? meta.revision : 0,
     ...(typeof etag === 'string' ? { etag } : {}),
     ...(typeof meta.exportPipelineId === 'string' ? { exportPipelineId: meta.exportPipelineId } : {}),
+    ...(typeof meta.targetId === 'string' ? { targetId: meta.targetId } : {}),
+    ...(typeof meta.width === 'number' ? { width: meta.width } : {}),
+    ...(typeof meta.height === 'number' ? { height: meta.height } : {}),
   };
 }
 

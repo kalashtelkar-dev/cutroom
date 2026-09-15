@@ -13,7 +13,7 @@
  * playhead only at the moments a human would call an event: a seek, a stop, a
  * click on the ruler.
  */
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   ZERO, clampFrames, frames, rateFps, toTimecode,
   type Frames, type Rate,
@@ -201,10 +201,43 @@ export interface PlayheadProps {
   dynamic?: boolean;
   /** Width of the ±5 frame wash either side. Zero hides it. */
   shadowFrames?: number;
+  /** Direct scrubbing from the playhead handle. */
+  onScrub?: (at: Frames) => void;
+  onScrubEnd?: () => void;
+  frameAtClientX?: (clientX: number) => Frames;
 }
 
-export function Playhead({ controller, ppf, dynamic = false, shadowFrames = 5 }: PlayheadProps) {
+export function Playhead({
+  controller, ppf, dynamic = false, shadowFrames = 5,
+  onScrub, onScrubEnd, frameAtClientX,
+}: PlayheadProps) {
   useEffect(() => { controller.setScale(ppf); }, [controller, ppf]);
+
+  const [isHovered, setIsHovered] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
+
+  const onPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (!frameAtClientX || !onScrub) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setIsDragging(true);
+    onScrub(frameAtClientX(e.clientX));
+  }, [frameAtClientX, onScrub]);
+
+  const onPointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.currentTarget.hasPointerCapture(e.pointerId) && frameAtClientX && onScrub) {
+      onScrub(frameAtClientX(e.clientX));
+    }
+  }, [frameAtClientX, onScrub]);
+
+  const onPointerUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    setIsDragging(false);
+    onScrubEnd?.();
+  }, [onScrubEnd]);
 
   return (
     <>
@@ -245,22 +278,95 @@ export function Playhead({ controller, ppf, dynamic = false, shadowFrames = 5 }:
           width: 1,
           background: dynamic ? 'var(--yellow)' : 'var(--red)',
           pointerEvents: 'none',
-          zIndex: 6,
+          zIndex: 7,
           willChange: 'transform',
         }}
       >
+        {/* The grab-able handle at the top of the playhead */}
         <div
-          aria-hidden
+          role="slider"
+          aria-label="Playhead"
+          tabIndex={0}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerCancel={onPointerUp}
+          onPointerEnter={() => setIsHovered(true)}
+          onPointerLeave={() => setIsHovered(false)}
           style={{
-            position: 'absolute',
+            position: 'sticky',
             top: 0,
-            left: -5,
-            width: 11,
-            height: 11,
-            background: dynamic ? 'var(--yellow)' : 'var(--red)',
-            clipPath: 'polygon(0 0,100% 0,50% 100%)',
+            width: 28,
+            height: 25,
+            marginLeft: -14,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            cursor: isDragging ? 'grabbing' : 'grab',
+            pointerEvents: 'auto',
+            userSelect: 'none',
+            touchAction: 'none',
+            zIndex: 10,
           }}
-        />
+        >
+          {/* Floating timecode badge */}
+          <div
+            ref={(el) => {
+              controller.attach(el, 'timecode');
+              return () => controller.detach(el);
+            }}
+            aria-hidden
+            style={{
+              position: 'absolute',
+              bottom: 27,
+              pointerEvents: 'none',
+              whiteSpace: 'nowrap',
+              fontFamily: 'var(--mono)',
+              fontSize: 9.5,
+              lineHeight: 1,
+              padding: '3px 6px',
+              borderRadius: 3,
+              background: 'var(--panel)',
+              border: `1px solid ${dynamic ? 'var(--yellow)' : 'var(--red)'}`,
+              color: 'var(--t1)',
+              boxShadow: '0 2px 8px rgba(0,0,0,0.5)',
+              opacity: isHovered || isDragging ? 1 : 0,
+              transform: isHovered || isDragging ? 'translateY(0)' : 'translateY(4px)',
+              transition: 'opacity 0.12s, transform 0.12s',
+            }}
+          >
+            {toTimecode(controller.get(), controller.rate)}
+          </div>
+
+          {/* Resolve-style shield needle head */}
+          <div
+            aria-hidden
+            style={{
+              width: 14,
+              height: 18,
+              background: dynamic ? 'var(--yellow)' : 'var(--red)',
+              clipPath: 'polygon(0% 0%, 100% 0%, 100% 55%, 50% 100%, 0% 55%)',
+              boxShadow: isDragging
+                ? '0 0 8px color-mix(in srgb, var(${dynamic ? "--yellow" : "--red"}) 70%, transparent)'
+                : '0 1px 3px rgba(0,0,0,0.4)',
+              transition: 'filter 0.12s',
+              filter: isHovered || isDragging ? 'brightness(1.2)' : 'none',
+              position: 'relative',
+            }}
+          >
+            {/* Center alignment needle */}
+            <div
+              style={{
+                position: 'absolute',
+                top: 2,
+                bottom: 5,
+                left: 6,
+                width: 1,
+                background: 'rgba(255,255,255,0.7)',
+              }}
+            />
+          </div>
+        </div>
       </div>
     </>
   );

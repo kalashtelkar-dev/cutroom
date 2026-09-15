@@ -508,7 +508,14 @@ function isTrackAudible(track: Track, allTracks: Track[]): boolean {
         </div>
 
         <div className="cr-vstage">
-          <div className="cr-vframe">
+          <div
+            className="cr-vframe"
+            style={{
+              aspectRatio: `${timeline.width ?? 1920} / ${timeline.height ?? 1080}`,
+              width: `min(100%, calc(100cqh * (${timeline.width ?? 1920} / ${timeline.height ?? 1080})))`,
+              height: `min(100%, calc(100cqw * (${timeline.height ?? 1080} / ${timeline.width ?? 1920})))`,
+            }}
+          >
             <Layers
               layers={layers}
               audioLayers={audioLayers}
@@ -708,22 +715,14 @@ const CSS = `
 .cr-vsep{color:var(--t3)}
 .cr-vstage{
   flex:1;background:var(--app);display:flex;align-items:center;justify-content:center;
-  min-height:0;position:relative;overflow:hidden;
+  min-height:0;position:relative;overflow:hidden;container-type:size;
 }
-/* the frame the layers composite inside: a fixed 16:9 box so a layer with a
-   different shape letterboxes rather than resizing the panel.
-
-   It is the query container, and it has to be this element rather than the
-   caption box: cqw and cqh resolve against an ANCESTOR container, never
-   against the element declaring one, so a .cr-vcap that was its own container
-   measured its own padding against the window. In a 2560px window a 520px
-   frame was given 153.6px of padding a side, which left 212px for the words
-   and shrank the type with it. Sizing here is safe because this box is sized
-   by its width, height and ratio and never by what is inside it. */
+/* the frame the layers composite inside: aspect ratio matches the project's target
+   format (16:9, 9:16, 1:1, etc.). */
 .cr-vframe{
-  position:relative;width:100%;height:100%;max-width:100%;max-height:100%;
-  aspect-ratio:16/9;background:var(--app);overflow:hidden;isolation:isolate;
-  container-type:size;
+  position:relative;max-width:100%;max-height:100%;
+  background:var(--app);overflow:hidden;isolation:isolate;
+  container-type:size;box-shadow:0 0 20px rgba(0,0,0,0.6);
 }
 .cr-vframe video,.cr-vframe img{display:block}
 .cr-vempty{

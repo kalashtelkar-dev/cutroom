@@ -192,7 +192,7 @@ export function IntelEditor({ wb }: { wb: WorkbenchStore }) {
                 <li key={r.case.prompt}>
                   <button type="button" className="wb-linkbtn" onClick={() => wb.inspect(r.case.prompt)}>
                     <span className="p">{r.case.prompt}</span>
-                    <span className="m">wanted {r.case.expect}, got {r.got ?? 'nothing'}</span>
+                    <span className="m">wanted {r.case.expect ?? 'nothing'}, got {r.got ?? 'nothing'}</span>
                   </button>
                 </li>
               ))}

@@ -10,6 +10,9 @@ import {
 } from '../editor-api/client.ts';
 import type { ExportTransport } from './types.ts';
 import { presignUpload } from '../editor-api/uploads.ts';
+import { FONT_DIR } from '../subtitles/fonts.ts';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 
 export function serverTransport(): ExportTransport {
   return {
@@ -75,6 +78,32 @@ export function serverTransport(): ExportTransport {
       const presigned = await presignUpload(filename);
       const put = await fetch(presigned.url, { method: 'PUT', body: text });
       if (!put.ok) throw new Error(`the caption file would not upload: ${put.status}`);
+      return presigned.key;
+    },
+
+    /**
+     * A bundled font, on its way into the subtitle file as an attachment.
+     *
+     * Read from `public/` relative to the working directory, which is where
+     * a Next server runs from and the one directory a build carries through
+     * byte for byte. Same bare PUT as the captions: a Content-Type here
+     * breaks a signature that covers `host` and nothing else.
+     */
+    uploadFont: async (font) => {
+      const path = join(process.cwd(), FONT_DIR, font.file);
+      let body: Blob;
+      try {
+        // a Blob rather than the bytes: fetch's own BodyInit will not take a
+        // Uint8Array here, and a Blob with no type sets no Content-Type,
+        // which this URL requires. It signs `host` alone and one extra
+        // header turns a good signature into a 403.
+        body = new Blob([new Uint8Array(await readFile(path))]);
+      } catch (e) {
+        throw new Error(`${font.family} is not on disk at ${path}: ${(e as Error).message}`);
+      }
+      const presigned = await presignUpload(font.file);
+      const put = await fetch(presigned.url, { method: 'PUT', body });
+      if (!put.ok) throw new Error(`the font would not upload: ${put.status}`);
       return presigned.key;
     },
 

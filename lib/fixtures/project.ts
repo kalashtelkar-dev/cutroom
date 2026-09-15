@@ -107,7 +107,14 @@ export function demoProject(): Timeline {
     name: 'Amalfi Coast · Summer Cut',
     rate: RATES.film,
     revision: 7,
-    media: DEMO_MEDIA,
+    /**
+     * A copy, one level deep. Two calls used to hand back the same pool
+     * object, so editing a clip's media in one document edited it in every
+     * document anyone had made, including the ones a test had already taken a
+     * snapshot of. A fixture that is shared by reference is a fixture that
+     * reports whatever the last caller did to it.
+     */
+    media: Object.fromEntries(Object.entries(DEMO_MEDIA).map(([k, m]) => [k, { ...m }])),
     /**
      * Markers land on real cuts, computed below rather than typed in seconds.
      * Frame positions are the SUM of integer durations, which is not the same

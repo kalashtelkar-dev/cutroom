@@ -30,7 +30,7 @@ validator checks them before anything runs.
     "kind": "operation",
     "engine": "ffmpeg",
     "operation": "volume",
-    "input": "$selection"
+    "input": "$source"
   }
 ]
 ```

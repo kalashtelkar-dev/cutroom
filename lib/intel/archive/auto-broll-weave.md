@@ -3,8 +3,8 @@ id: auto-broll-weave
 kind: pipeline
 rung: 3
 cost: 45s/min · gpu
-match: broll, b-roll, cutaway, cutaways, talking head, boring, variety, cover this, something to look at
-veto: at 0:, at 00:, exactly at, specific moment, punch in, zoom in, get closer, tighter
+match: weave, weave in, weave it in, cut them in, put them on v2, lay it over, do the whole thing
+veto: at 0:, at 00:, exactly at, specific moment, punch in, zoom in, get closer, tighter, plan, prompts, image prompt, video prompt, stock footage
 ---
 
 ## What it does
@@ -14,13 +14,20 @@ then asks a planner model for candidate windows. Ten deterministic
 gates re-check every number against measured values before anything
 is returned.
 
-Returns a **plan**, not media.
+Then it trims each candidate and lays the result on V2, so this one
+does not stop at a plan: it ends with clips on the timeline.
 
 ## When to use it
-"It's just me talking", "add some cutaways", "make this less of a
-talking head".
+When the ask is for the cutaways to end up on the timeline rather than
+for a plan to read. This is the longer, more expensive half of the job.
+
+"Weave it in", "cut them in for me", "do the whole thing and put them
+on V2".
 
 ## When NOT to use it
+- The ask is for the plan, the timings or the prompts. That is
+  `broll-b1`, which claims the plain b-roll vocabulary, costs less and
+  puts nothing on the timeline.
 - The user already knows the window ("cutaway at 0:12"). That is a
   timeline-op and costs 20ms instead of three minutes.
 - Footage under ~20s, scene detection has nothing to work with.
@@ -42,11 +49,13 @@ validator checks them before anything runs.
   {
     "kind": "pipeline",
     "pipelineId": "tpl_75e1fLGX64dF",
-    "input": "$selection"
+    "params": {
+      "video": "$source"
+    }
   },
   {
     "kind": "fanout",
-    "over": "$candidates",
+    "over": "$broll",
     "maxParallel": 2,
     "body": [
       {
@@ -61,7 +70,7 @@ validator checks them before anything runs.
     "kind": "timeline-op",
     "op": "add_clip",
     "track": "V2",
-    "from": "$candidates"
+    "from": "$broll"
   }
 ]
 ```

@@ -15,9 +15,10 @@ import { useEffect, useRef } from 'react';
 import { frames, rangeEnd, toTimecode, type Frames, type Rate, type TimeRange } from '../../lib/time/frames.ts';
 import type { Marker } from '../../lib/timeline/types.ts';
 import { tokenReader } from '../ui/tokens.ts';
-import { chooseTicks, framesToPx, pxToFrameAt, ticksIn } from './interactions.ts';
+import { chooseTicks, framesToPx, pxToFrameAt, ticksIn, RULER_HEIGHT } from './interactions.ts';
 
-export const RULER_HEIGHT = 25;
+// one home for the number: the shell sizes the timeline panel from it too
+export { RULER_HEIGHT };
 
 /** Canvases wider than this are refused by some browsers; window before then. */
 const MAX_CANVAS_PX = 8192;
@@ -32,6 +33,8 @@ export interface RulerProps {
   markers: readonly Marker[];
   /** Scrubbing. Fired continuously while the pointer is down. */
   onScrub: (at: Frames) => void;
+  /** Fired when scrubbing ends. */
+  onScrubEnd?: () => void;
   /** Clicking a marker parks the playhead on it rather than scrubbing. */
   onMarkerPick?: (marker: Marker) => void;
   /** Double clicking creates a marker at that frame. */
@@ -41,11 +44,12 @@ export interface RulerProps {
 }
 
 export function Ruler({
-  rate, ppf, width, visible, markers, onScrub, onMarkerPick,
+  rate, ppf, width, visible, markers, onScrub, onScrubEnd, onMarkerPick,
   onAddMarker, onRemoveMarker,
 }: RulerProps) {
   const canvas = useRef<HTMLCanvasElement | null>(null);
   const host = useRef<HTMLDivElement | null>(null);
+  const hoverLine = useRef<HTMLDivElement | null>(null);
 
   const originPx = framesToPx(visible.start, ppf);
   const windowPx = Math.min(MAX_CANVAS_PX, Math.max(1, framesToPx(visible.duration, ppf)));
@@ -141,12 +145,36 @@ export function Ruler({
         const marker = pickMarker(e.clientX);
         if (marker) { onMarkerPick?.(marker); return; }
         e.currentTarget.setPointerCapture(e.pointerId);
+        if (hoverLine.current) hoverLine.current.style.display = 'none';
         onScrub(frameAt(e.clientX));
       }}
       onPointerMove={(e) => {
-        if (e.currentTarget.hasPointerCapture(e.pointerId)) onScrub(frameAt(e.clientX));
+        if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+          onScrub(frameAt(e.clientX));
+        } else if (hoverLine.current) {
+          const rect = host.current?.getBoundingClientRect();
+          if (rect) {
+            const x = Math.max(0, e.clientX - rect.left);
+            hoverLine.current.style.transform = `translate3d(${x}px,0,0)`;
+            hoverLine.current.style.display = 'block';
+          }
+        }
       }}
-      onPointerUp={(e) => e.currentTarget.releasePointerCapture(e.pointerId)}
+      onPointerLeave={() => {
+        if (hoverLine.current) hoverLine.current.style.display = 'none';
+      }}
+      onPointerUp={(e) => {
+        if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+          e.currentTarget.releasePointerCapture(e.pointerId);
+        }
+        onScrubEnd?.();
+      }}
+      onPointerCancel={(e) => {
+        if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+          e.currentTarget.releasePointerCapture(e.pointerId);
+        }
+        onScrubEnd?.();
+      }}
       onDoubleClick={(e) => {
         const at = frameAt(e.clientX);
         onAddMarker?.(at);
@@ -179,6 +207,23 @@ export function Ruler({
           width: windowPx,
           height: RULER_HEIGHT,
           transform: `translate3d(${originPx}px,0,0)`,
+        }}
+      />
+      <div
+        ref={hoverLine}
+        aria-hidden
+        style={{
+          position: 'absolute',
+          top: 0,
+          bottom: 0,
+          left: 0,
+          width: 1,
+          background: 'var(--t3)',
+          opacity: 0.6,
+          display: 'none',
+          pointerEvents: 'none',
+          zIndex: 3,
+          willChange: 'transform',
         }}
       />
     </div>

@@ -2,15 +2,29 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   place, placeTrack, itemAt, clipAt, itemDuration, trackDuration, timelineDuration,
+  programmeDuration, playingTracks, footageSize,
   snapTargets, snap, trimBounds, findClip, emptyTimeline, isClip,
 } from '../lib/timeline/document.ts';
 import { demoProject, DEMO_MEDIA } from '../lib/fixtures/project.ts';
 import { RATES, frames, rangeEnd, toTimecode } from '../lib/time/frames.ts';
+import type { Clip, Gap, Timeline, Track, TrackItem } from '../lib/timeline/types.ts';
 
 const F = (sec: number) => frames(Math.round(sec * 24));
 
 describe('positions are derived, never stored', () => {
   const t = demoProject();
+
+  test('two demo projects do not share one media pool', () => {
+    // they used to, so measuring a picture in one document measured it in
+    // every document anyone had made, including ones already snapshotted
+    const a = demoProject();
+    const b = demoProject();
+    const key = Object.keys(a.media)[0];
+    assert.ok(key, 'the demo pool has something in it to share');
+    a.media[key] = { ...a.media[key], width: 1500, height: 1500 };
+    assert.equal(b.media[key].width, undefined, 'editing one pool edited the other');
+    assert.equal(DEMO_MEDIA[key].width, undefined, 'and it reached the table itself');
+  });
 
   test('a clip sits at the sum of what precedes it', () => {
     const v1 = t.tracks.find((x) => x.id === 'trk_v1')!;
@@ -47,6 +61,114 @@ describe('positions are derived, never stored', () => {
 
   test('an empty document is zero, not undefined', () => {
     assert.equal(timelineDuration(emptyTimeline('x', 'x', RATES.film)), 0);
+  });
+});
+
+/**
+ * Where a render stops.
+ *
+ * Written after an export came back four seconds longer than the cut, with
+ * nothing in the extra four seconds. Every case below is a way to reach past
+ * the last frame that carries anything, and every one of them used to make
+ * the file longer.
+ */
+describe('the programme ends at the last thing anyone can see or hear', () => {
+  const V = (items: TrackItem[], over: Partial<Track> = {}): Track => ({
+    id: 'trk_v1', kind: 'video', name: 'V1', items,
+    locked: false, muted: false, solo: false, enabled: true, autoSelect: true, ...over,
+  });
+  const A = (items: TrackItem[], over: Partial<Track> = {}): Track =>
+    ({ ...V(items), id: 'trk_a1', kind: 'audio', name: 'A1', ...over });
+  const shot = (id: string, duration: number): Clip => ({
+    id, kind: 'clip', name: id, mediaKey: 'm/a.mov',
+    sourceRange: { start: frames(0), duration: frames(duration) }, enabled: true, effects: [],
+  });
+  const hole = (duration: number): Gap => ({ id: `g_${duration}`, kind: 'gap', duration: frames(duration) });
+  const doc = (tracks: Track[]): Timeline =>
+    ({ ...emptyTimeline('tl', 'T', RATES.film), tracks });
+
+  test('there is something to measure, or none of this checked anything', () => {
+    assert.equal(programmeDuration(doc([V([shot('a', 100)])])), 100);
+  });
+
+  test('a gap left behind by a delete is not four seconds of programme', () => {
+    const t = doc([V([shot('a', 100), hole(96)])]);
+    assert.equal(programmeDuration(t), 100);
+    assert.equal(timelineDuration(t), 100, 'and the timeline does not claim it either');
+  });
+
+  test('a gap BETWEEN two clips still holds the second one where it is', () => {
+    assert.equal(programmeDuration(doc([V([shot('a', 100), hole(96), shot('b', 24)])])), 220);
+  });
+
+  test('a subtitle cue past the end of the footage buys no black to put it on', () => {
+    const captions: Track = {
+      ...V([hole(300), { id: 'cap', kind: 'caption', text: 'late', duration: frames(96), enabled: true }]),
+      id: 'trk_s1', kind: 'subtitle', name: 'Subtitles',
+    };
+    const t = doc([V([shot('a', 100)]), captions]);
+    assert.equal(timelineDuration(t), 396, 'the cue is on the timeline');
+    assert.equal(programmeDuration(t), 100, 'and not in the file');
+  });
+
+  test('a clip switched off at the end shortens the render, and one in the middle does not', () => {
+    const off = { ...shot('off', 96), enabled: false };
+    assert.equal(programmeDuration(doc([V([shot('a', 100), off])])), 100);
+    assert.equal(programmeDuration(doc([V([shot('a', 100), off, shot('b', 24)])])), 220);
+  });
+
+  test('sound that outlasts the picture is still the programme', () => {
+    assert.equal(programmeDuration(doc([V([shot('a', 100)]), A([shot('b', 260)])])), 260);
+  });
+
+  test('a hidden picture track and a muted sound track are not the programme', () => {
+    assert.equal(programmeDuration(doc([V([shot('a', 100)]), A([shot('b', 260)], { muted: true })])), 100);
+    assert.equal(
+      programmeDuration(doc([V([shot('a', 100)]), { ...V([shot('c', 300)]), id: 'trk_v2', enabled: false }])),
+      100,
+    );
+  });
+
+  /**
+   * The rule the compiler relies on.
+   *
+   * `compile` decides which tracks to build with the same function, so if
+   * these two ever disagreed the render would be as long as one of them and
+   * as full as the other.
+   */
+  /**
+   * What the export dialog reads to say what a vertical frame will do.
+   *
+   * Conservative on purpose: a sentence about black bars shown over footage
+   * that might already be vertical is worse than no sentence at all.
+   */
+  test('the footage size is one answer, or no answer', () => {
+    const hd = (k: string) => ({ key: k, name: k, kind: 'video' as const,
+      available: { start: frames(0), duration: frames(9000) }, width: 1920, height: 1080 });
+    const t = doc([V([shot('a', 100), shot('b', 100)])]);
+    t.media = { 'm/a.mov': hd('m/a.mov') };
+    assert.deepEqual(footageSize(t), { width: 1920, height: 1080 });
+
+    const mixed = doc([V([shot('a', 100), { ...shot('b', 100), mediaKey: 'm/b.mov' }])]);
+    mixed.media = { 'm/a.mov': hd('m/a.mov'), 'm/b.mov': { ...hd('m/b.mov'), width: 1080, height: 1920 } };
+    assert.equal(footageSize(mixed), null, 'two shapes is not one shape');
+
+    const unknown = doc([V([shot('a', 100)])]);
+    unknown.media = { 'm/a.mov': { ...hd('m/a.mov'), width: undefined, height: undefined } };
+    assert.equal(footageSize(unknown), null, 'a clip that never reported a size is not evidence');
+
+    assert.equal(footageSize(doc([V([])])), null, 'and neither is nothing at all');
+  });
+
+  test('soloing a picture track does not silence the sound', () => {
+    const t = doc([
+      { ...V([shot('a', 100)]), id: 'trk_v2', solo: true },
+      V([shot('b', 400)]),
+      A([shot('c', 260)]),
+    ]);
+    assert.deepEqual(playingTracks(t, 'video').map((x) => x.id), ['trk_v2']);
+    assert.deepEqual(playingTracks(t, 'audio').map((x) => x.id), ['trk_a1']);
+    assert.equal(programmeDuration(t), 260);
   });
 });
 

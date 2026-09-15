@@ -1,270 +1,483 @@
-import {
-  NODE_LIST, PORT_TYPES, DEPENDS_NODES, fanOutPorts,
-} from '@/lib/editor-api/catalogue.ts';
-import { GraphBuilder, preflight } from '@/lib/editor-api/graph.ts';
-import {
-  RATES, frames, timeRange, rangeEnd, toTimecode, rateLabel,
-} from '@/lib/time/frames.ts';
-import { allCards } from '@/lib/intel/index.ts';
-import { route } from '@/lib/router/plan.ts';
+'use client';
 
-/**
- * The foundation, reporting on itself.
- *
- * This is scaffolding with real numbers in it rather than a placeholder: it
- * renders from the generated catalogue and runs the preflight checker for
- * real, so a broken import or a stale catalogue shows up as a broken page.
- */
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { browserProjects, type ProjectSummary } from '@/lib/project/store.ts';
+import { NewProjectDialog, type TargetChoice } from '@/components/shell/NewProjectDialog.tsx';
+import { emptyTimeline } from '@/lib/timeline/document.ts';
+import { saveLocalProject } from '@/lib/project/localStore.ts';
+import { TARGETS, targetFor, type ExportTarget } from '@/lib/export/targets.ts';
+import { getTemplate } from '@/lib/timeline/templates.ts';
+import type { Rate } from '@/lib/time/frames.ts';
 
-// a graph that should compile, and one that should not
-function samples() {
-  const good = new GraphBuilder();
-  const gsrc = good.input('video', 'file:video');
-  const gthumb = good.op('ffmpeg', 'thumbnail', { count: 6, width: 480 });
-  const gmont = good.op('imagemagick', 'montage');
-  const gout = good.output(['files']);
-  good.wire(gsrc, 'value', gthumb, 'input')
-      .wire(gthumb, 'frames', gmont, 'input')   // list input: collects the fan-out
-      .wire(gmont, 'files', gout, 'files');
+export default function ProjectsPage() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [query, setQuery] = useState('');
+  const [newProjectOpen, setNewProjectOpen] = useState(false);
+  const [notification, setNotification] = useState<string | null>(null);
 
-  const bad = new GraphBuilder();
-  const bsrc = bad.input('video', 'file:video');
-  const b1 = bad.op('ffmpeg', 'thumbnail', { count: 4 });
-  const b2 = bad.op('ffmpeg', 'thumbnail', { count: 4, atSec: 2 });
-  const comp = bad.op('imagemagick', 'composite');
-  const bout = bad.output(['file']);
-  bad.wire(bsrc, 'value', b1, 'input').wire(bsrc, 'value', b2, 'input')
-     .wire(b1, 'frames', comp, 'base').wire(b2, 'frames', comp, 'overlay')
-     .wire(comp, 'file', bout, 'file');
+  const notify = useCallback((msg: string) => {
+    setNotification(msg);
+    setTimeout(() => setNotification((cur) => (cur === msg ? null : cur)), 3000);
+  }, []);
 
-  return { good: good.build(), bad: bad.build() };
-}
+  const refreshList = useCallback(async () => {
+    // Dev helper: visit /?clear to wipe stored projects and preview the empty state.
+    if (searchParams.has('clear')) {
+      try {
+        const keys = Object.keys(localStorage).filter(
+          (k) => k.startsWith('cutroom.project.') || k === 'cutroom.projects.manifest.v1',
+        );
+        for (const k of keys) localStorage.removeItem(k);
+      } catch { /* ignore */ }
+      setProjects([]);
+      setLoading(false);
+      return;
+    }
+    try {
+      const list = await browserProjects().list();
+      setProjects(list);
+    } catch {
+      // ignore
+    } finally {
+      setLoading(false);
+    }
+  }, [searchParams]);
 
-export default function Home() {
-  const engines = [...new Set(NODE_LIST.map((n) => n.engine))].sort();
-  const fanOut = NODE_LIST.flatMap((n) => fanOutPorts(n)).length;
-  const gpu = NODE_LIST.filter((n) => n.gpu).length;
-  const { good, bad } = samples();
-  const goodIssues = preflight(good);
-  const badIssues = preflight(bad);
+  useEffect(() => {
+    void refreshList();
+  }, [refreshList]);
 
-  const clip = timeRange(frames(240), frames(187));
+  const handleCreateProject = useCallback((
+    name: string,
+    rate: Rate,
+    templateId: string,
+    target: TargetChoice,
+  ) => {
+    const id = `tl_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+    const newDoc = emptyTimeline(id, name, rate, templateId, {
+      targetId: target.targetId,
+      width: target.width,
+      height: target.height,
+    });
+    saveLocalProject(newDoc, null);
+    notify(`Created project "${name}" with ${getTemplate(templateId).name} layout`);
+    router.push(`/edit?project=${encodeURIComponent(id)}`);
+  }, [notify, router]);
+
+  const handleOpenProject = useCallback((id: string) => {
+    router.push(`/edit?project=${encodeURIComponent(id)}`);
+  }, [router]);
+
+  const handleDeleteProject = useCallback(async (id: string, name: string) => {
+    if (!window.confirm(`Delete project "${name}"? This cannot be undone.`)) return;
+    try {
+      await browserProjects().delete(id);
+      notify(`Deleted "${name}"`);
+      await refreshList();
+    } catch (e) {
+      notify(`Could not delete: ${(e as Error).message}`);
+    }
+  }, [refreshList, notify]);
+
+  const handleRenameProject = useCallback(async (id: string, currentName: string) => {
+    const nextName = window.prompt('Rename project to:', currentName);
+    if (!nextName || nextName.trim() === '' || nextName === currentName) return;
+    try {
+      await browserProjects().rename(id, nextName.trim());
+      notify(`Renamed to "${nextName.trim()}"`);
+      await refreshList();
+    } catch (e) {
+      notify(`Could not rename: ${(e as Error).message}`);
+    }
+  }, [refreshList, notify]);
+
+  const handleDuplicateProject = useCallback(async (id: string, name: string) => {
+    try {
+      const copy = await browserProjects().duplicate(id, `${name} Copy`);
+      notify(`Duplicated "${copy.name}"`);
+      await refreshList();
+    } catch (e) {
+      notify(`Could not duplicate: ${(e as Error).message}`);
+    }
+  }, [refreshList, notify]);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return projects;
+    return projects.filter((p) => p.name.toLowerCase().includes(q));
+  }, [projects, query]);
 
   return (
-    <main className="mx-auto max-w-3xl px-5 py-12">
-      <header className="mb-10">
-        <div className="mb-2 flex items-center gap-2.5">
-          <span className="block h-4 w-4 rounded-sm bg-gradient-to-br from-[var(--orange)] to-[#d97f1e]" />
-          <h1 className="text-xl font-bold tracking-tight">Cutroom</h1>
-        </div>
-        <p className="max-w-prose text-[var(--t2)]">
-          AI video auto-editor for AISuite. Generated footage goes in, an edited
-          timeline comes out, and a Resolve-class NLE is there to correct it by
-          hand.
-        </p>
-      </header>
+    <>
+      <style href="cutroom-projects-page" precedence="medium">{CSS}</style>
+      <div className="cr-gallery-wrap">
+        <header className="cr-gallery-head">
+          <div />
 
-      {/* This page is a self-report. The product is behind these two links,
-          and without them it is not findable from the root at all. */}
-      <nav aria-label="Open" className="mb-10 grid gap-3 sm:grid-cols-2">
-        <Door
-          href="/edit"
-          accent="var(--orange)"
-          title="Editor"
-          blurb="Import, cut, and assemble. Media pool, viewer, timeline, inspector and the assistant."
-          icon={<EditorIcon />}
-        />
-        <Door
-          href="/workbench"
-          accent="var(--wb)"
-          title="Workbench"
-          blurb="Bench the router on a real prompt, edit an intel card, run the evals, inspect a pipeline."
-          icon={<WorkbenchIcon />}
-        />
-      </nav>
+          <div className="cr-head-actions">
+            <div className="cr-search-box">
+              <svg viewBox="0 0 16 16" width={13} height={13} fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
+                <circle cx="6.5" cy="6.5" r="4.5" />
+                <path d="M10 10l4 4" strokeLinecap="round" />
+              </svg>
+              <input
+                type="text"
+                placeholder="Search projects..."
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+              />
+              {query ? (
+                <button type="button" onClick={() => setQuery('')} aria-label="Clear search">✕</button>
+              ) : null}
+            </div>
 
-      <Section title="Node catalogue" note="generated from GET /v1/pipelines/nodes">
-        <Stats
-          rows={[
-            ['nodes', String(NODE_LIST.length)],
-            ['engines', String(engines.length)],
-            ['gpu-bound', `${gpu} of ${NODE_LIST.length}`],
-            ['port types', String(PORT_TYPES.length)],
-            ['fan-out capable ports', String(fanOut)],
-            ['arity decided by params', DEPENDS_NODES.join(', ') || 'none'],
-          ]}
-        />
-        <div className="mt-3 flex flex-wrap gap-1.5">
-          {engines.map((e) => (
-            <span key={e} className="rounded-sm border border-[var(--edge-soft)] px-2 py-0.5 font-mono text-[11px] text-[var(--t2)]">
-              {e}
-              <span className="ml-1.5 text-[var(--t3)]">
-                {NODE_LIST.filter((n) => n.engine === e).length}
-              </span>
-            </span>
-          ))}
-        </div>
-      </Section>
+            <a href="/workbench" className="cr-wb-link" title="Open workbench and diagnostics">
+              Workbench
+            </a>
+          </div>
+        </header>
 
-      <Section title="Time model" note="integer frames in, RationalTime only at the edge">
-        <Stats
-          rows={[
-            ['project rate', rateLabel(RATES.film)],
-            ['clip range', `[${clip.start}, ${rangeEnd(clip)}) · ${clip.duration} frames`],
-            ['as timecode', `${toTimecode(clip.start, RATES.film)} → ${toTimecode(rangeEnd(clip), RATES.film)}`],
-            ['29.97 drop-frame', `${toTimecode(frames(1799), RATES.ntsc)} then ${toTimecode(frames(1800), RATES.ntsc)}`],
-          ]}
-        />
-      </Section>
+        <main className="cr-gallery-main">
+          <div className="cr-gallery-title-row">
+            <div>
+              <h1 className="cr-gallery-title">Projects</h1>
+              <p className="cr-gallery-sub">
+                {projects.length} {projects.length === 1 ? 'project' : 'projects'} stored
+              </p>
+            </div>
+          </div>
 
-      <Section title="Graph preflight" note="the compiler's diagnostics, answered offline">
-        <p className="mb-3 text-[var(--t2)]">
-          A sound graph and one that reaches for a zip the DAG does not have. Both
-          checked here, with no network, and both agree with{' '}
-          <code className="font-mono text-[12px] text-[var(--t1)]">POST /v1/pipelines/validate</code>.
-        </p>
-        <Verdict label="thumbnail ×6 → montage (fan-out collected)" issues={goodIssues} />
-        <Verdict label="two fan-outs into one node" issues={badIssues} />
-      </Section>
+          {loading ? (
+            <div className="cr-empty-state">
+              <span className="cr-loading-spinner" />
+              <p>Loading projects...</p>
+            </div>
+          ) : filtered.length === 0 ? (
+            <div className="cr-empty-state">
+              {query ? (
+                <>
+                  <p className="cr-empty-hdr">No matching projects</p>
+                  <p className="cr-empty-msg">No projects match the search query &quot;{query}&quot;.</p>
+                  <button type="button" className="cr-ghost-btn" onClick={() => setQuery('')}>
+                    Clear search
+                  </button>
+                </>
+              ) : (
+                <>
+                  <div className="cr-empty-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width={32} height={32} fill="none" stroke="currentColor" strokeWidth={1.4}>
+                      <rect x="2" y="4" width="20" height="16" rx="3" />
+                      <path d="M7 4v16M17 4v16M2 12h20" />
+                    </svg>
+                  </div>
+                  <p className="cr-empty-hdr">No projects yet</p>
+                  <p className="cr-empty-msg">
+                    Create a new project below to start cutting footage, adding B-roll, and generating captions.
+                  </p>
+                  <button
+                    type="button"
+                    className="cr-create-btn-inline"
+                    onClick={() => setNewProjectOpen(true)}
+                  >
+                    + Create new project
+                  </button>
+                </>
+              )}
+            </div>
+          ) : (
+            <div className="cr-cards-grid">
+              {filtered.map((project) => {
+                const target: ExportTarget = (project.targetId && TARGETS.find((t) => t.id === project.targetId))
+                  || (project.width && project.height && targetFor(project.width, project.height))
+                  || TARGETS[0];
+                const isVertical = target.shape === 'vertical';
+                const isSquare = target.shape === 'square';
+                const aspectStr = isVertical ? '9 / 16' : isSquare ? '1 / 1' : '16 / 9';
 
-      <Section title="Router" note={`${allCards().length} intel cards · retrieval is arithmetic, so it is testable`}>
-        <p className="mb-3 text-[var(--t2)]">
-          Each card owns the phrases it answers to. A card that claims nothing in
-          the prompt does not act, silence beats a confident guess.
-        </p>
-        <div className="overflow-x-auto">
-          <table className="w-full border-collapse text-[12.5px]">
-            <thead>
-              <tr className="border-b border-[var(--edge-soft)] text-left">
-                <th className="py-1.5 pr-3 font-medium text-[var(--t3)]">prompt</th>
-                <th className="py-1.5 pr-3 font-medium text-[var(--t3)]">routes to</th>
-                <th className="py-1.5 pr-3 font-medium text-[var(--t3)]">rung</th>
-                <th className="py-1.5 font-medium text-[var(--t3)]">because</th>
-              </tr>
-            </thead>
-            <tbody>
-              {[
-                'Add some cutaways where he pauses',
-                'Put a cutaway at 0:12',
-                'This bit is too loud',
-                'what is the weather like',
-              ].map((p) => {
-                const r = route(p);
                 return (
-                  <tr key={p} className="border-b border-[var(--edge)] align-top">
-                    <td className="py-2 pr-3 text-[var(--t1)]">{p}</td>
-                    <td className="py-2 pr-3 font-mono text-[12px]" style={{ color: r.plan ? 'var(--t1)' : 'var(--t3)' }}>
-                      {r.plan?.cardId ?? 'declined'}
-                    </td>
-                    <td className="py-2 pr-3 font-mono tabular-nums text-[var(--t2)]">{r.plan?.rung ?? '-'}</td>
-                    <td className="py-2 text-[var(--t3)]">{r.plan?.rationale ?? r.declined}</td>
-                  </tr>
+                  <div
+                    key={project.id}
+                    className="cr-proj-card"
+                    onClick={() => handleOpenProject(project.id)}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        handleOpenProject(project.id);
+                      }
+                    }}
+                  >
+                    <div className="cr-card-thumb-stage">
+                      <div
+                        className="cr-card-preview-box"
+                        style={{ aspectRatio: aspectStr }}
+                      >
+                        <span className="cr-preview-target-tag">{target.name}</span>
+                        <span className="cr-preview-size-tag">
+                          {project.width && project.height ? `${project.width}x${project.height}` : `${target.width}x${target.height}`}
+                        </span>
+                        <div className="cr-preview-play-icon" aria-hidden="true">
+                          <svg viewBox="0 0 24 24" width={22} height={22} fill="currentColor">
+                            <path d="M8 5v14l11-7z" />
+                          </svg>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="cr-card-body">
+                      <div className="cr-card-title-row">
+                        <span className="cr-card-name" title={project.name}>{project.name}</span>
+                        <span className="cr-card-rev">rev {project.revision}</span>
+                      </div>
+
+                      <div className="cr-card-meta">
+                        <span>{project.clipCount} {project.clipCount === 1 ? 'clip' : 'clips'}</span>
+                        <span className="cr-dot" />
+                        <span>{project.durationSec ? `${project.durationSec.toFixed(1)}s` : '0.0s'}</span>
+                        {project.updatedAt ? (
+                          <>
+                            <span className="cr-dot" />
+                            <span>{new Date(project.updatedAt).toLocaleDateString()}</span>
+                          </>
+                        ) : null}
+                      </div>
+
+                      <div className="cr-card-actions" onClick={(e) => e.stopPropagation()}>
+                        <button
+                          type="button"
+                          className="cr-act-btn pri"
+                          onClick={() => handleOpenProject(project.id)}
+                        >
+                          Open
+                        </button>
+                        <button
+                          type="button"
+                          className="cr-act-btn"
+                          title="Rename project"
+                          onClick={() => void handleRenameProject(project.id, project.name)}
+                        >
+                          Rename
+                        </button>
+                        <button
+                          type="button"
+                          className="cr-act-btn"
+                          title="Duplicate project"
+                          onClick={() => void handleDuplicateProject(project.id, project.name)}
+                        >
+                          Duplicate
+                        </button>
+                        <button
+                          type="button"
+                          className="cr-act-btn del"
+                          title="Delete project"
+                          onClick={() => void handleDeleteProject(project.id, project.name)}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  </div>
                 );
               })}
-            </tbody>
-          </table>
+            </div>
+          )}
+        </main>
+
+        <div className="cr-bottom-bar">
+          <button
+            type="button"
+            className="cr-create-project-btn"
+            onClick={() => setNewProjectOpen(true)}
+          >
+            <svg viewBox="0 0 16 16" width={16} height={16} fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+              <path d="M8 3v10M3 8h10" strokeLinecap="round" />
+            </svg>
+            Create new project
+          </button>
         </div>
-      </Section>
-    </main>
-  );
-}
 
-/**
- * A way in.
- *
- * Two of these and nothing else at the top of the page: whatever else this
- * page reports on, someone arriving at the root is looking for the app.
- */
-function Door({
-  href, title, blurb, accent, icon,
-}: {
-  href: string;
-  title: string;
-  blurb: string;
-  accent: string;
-  icon: React.ReactNode;
-}) {
-  return (
-    <a
-      href={href}
-      className="group flex items-start gap-3 rounded-sm border border-[var(--edge-soft)] bg-[var(--panel)] p-4 no-underline transition-colors hover:border-[var(--t3)] hover:bg-[var(--panel-2)]"
-      style={{ boxShadow: 'var(--lift)' }}
-    >
-      <span
-        className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-sm"
-        style={{ color: accent, border: `1px solid ${accent}`, opacity: 0.9 }}
-      >
-        {icon}
-      </span>
-      <span className="min-w-0">
-        <span className="flex items-baseline gap-2">
-          <span className="text-[14px] font-semibold text-[var(--t1)]">{title}</span>
-          <span className="font-mono text-[11px] text-[var(--t3)]">{href}</span>
-        </span>
-        <span className="mt-1 block text-[12.5px] leading-relaxed text-[var(--t2)]">{blurb}</span>
-      </span>
-    </a>
-  );
-}
-
-const EditorIcon = () => (
-  <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
-    strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-    <rect x="2.5" y="5" width="19" height="14" rx="2" />
-    <path d="M7 5v14M17 5v14M2.5 12h4.5M17 12h4.5" />
-  </svg>
-);
-
-const WorkbenchIcon = () => (
-  <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
-    strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-    <circle cx="6" cy="7" r="2.4" /><circle cx="18" cy="17" r="2.4" />
-    <path d="M8.4 7H15a2.6 2.6 0 012.6 2.6v5M15.6 17H9a2.6 2.6 0 01-2.6-2.6v-5" />
-  </svg>
-);
-
-function Section({ title, note, children }: { title: string; note: string; children: React.ReactNode }) {
-  return (
-    <section className="mb-10 border-t border-[var(--edge-soft)] pt-5">
-      <h2 className="text-[15px] font-semibold">{title}</h2>
-      <p className="mb-3.5 font-mono text-[11px] tracking-wide text-[var(--t3)]">{note}</p>
-      {children}
-    </section>
-  );
-}
-
-function Stats({ rows }: { rows: [string, string][] }) {
-  return (
-    <dl className="grid grid-cols-[minmax(0,1fr)_minmax(0,2fr)] gap-x-5 gap-y-1.5 text-[12.5px]">
-      {rows.map(([k, v]) => (
-        <div key={k} className="contents">
-          <dt className="text-[var(--t3)]">{k}</dt>
-          <dd className="m-0 font-mono tabular-nums text-[var(--t1)]">{v}</dd>
-        </div>
-      ))}
-    </dl>
-  );
-}
-
-function Verdict({ label, issues }: { label: string; issues: { code: string; message: string }[] }) {
-  const clean = issues.length === 0;
-  return (
-    <div className="mb-2 rounded-sm border border-[var(--edge-soft)] bg-[var(--panel)] p-3" style={{ boxShadow: 'var(--lift)' }}>
-      <div className="flex items-center gap-2.5">
-        <span
-          className="h-1.5 w-1.5 shrink-0 rounded-full"
-          style={{ background: clean ? 'var(--green)' : 'var(--red)' }}
+        <NewProjectDialog
+          open={newProjectOpen}
+          onClose={() => setNewProjectOpen(false)}
+          onCreate={handleCreateProject}
         />
-        <span className="text-[12.5px] font-medium">{label}</span>
-        <span className="ml-auto font-mono text-[11px] text-[var(--t3)]">
-          {clean ? 'compiles' : `${issues.length} issue${issues.length === 1 ? '' : 's'}`}
-        </span>
+
+        {notification ? <div className="cr-toast">{notification}</div> : null}
       </div>
-      {issues.map((d, i) => (
-        <p key={i} className="mt-2 mb-0 border-l-2 border-[var(--red)] pl-2.5 text-[12px] leading-relaxed text-[var(--t2)]">
-          <span className="font-mono text-[var(--red)]">{d.code}</span>: {d.message}
-        </p>
-      ))}
-    </div>
+    </>
   );
 }
+
+const CSS = `
+.cr-gallery-wrap{
+  min-height:100vh;display:flex;flex-direction:column;background:var(--app);
+  color:var(--t1);font-family:var(--ui);padding-bottom:90px;position:relative;
+}
+.cr-gallery-head{
+  height:48px;border-bottom:1px solid var(--edge);background:var(--head);
+  display:flex;align-items:center;justify-content:space-between;padding:0 24px;
+  position:sticky;top:0;z-index:20;box-shadow:var(--sink);
+}
+.cr-brand{display:flex;align-items:center;gap:9px}
+.cr-brand-mark{
+  width:16px;height:16px;border-radius:3px;
+  background:linear-gradient(135deg, var(--orange), #b81414);flex-shrink:0;
+}
+.cr-brand-name{font-size:14px;font-weight:700;letter-spacing:-0.02em;color:var(--t1)}
+.cr-brand-badge{
+  font-size:10px;font-weight:600;padding:2px 7px;border-radius:3px;
+  background:var(--panel-2);color:var(--t3);border:1px solid var(--edge-soft);
+  text-transform:uppercase;letter-spacing:0.04em;
+}
+.cr-head-actions{display:flex;align-items:center;gap:12px}
+.cr-search-box{
+  display:flex;align-items:center;gap:7px;background:var(--app);
+  border:1px solid var(--edge-soft);border-radius:5px;padding:4px 9px;
+  color:var(--t2);width:220px;transition:border-color .15s;
+}
+.cr-search-box:focus-within{border-color:var(--orange);color:var(--t1)}
+.cr-search-box input{
+  background:none;border:0;color:inherit;font:inherit;font-size:12px;
+  width:100%;outline:none;
+}
+.cr-search-box button{
+  background:none;border:0;color:var(--t3);cursor:pointer;padding:0;font-size:11px;
+}
+.cr-search-box button:hover{color:var(--t1)}
+.cr-wb-link{
+  font-size:12px;font-weight:500;color:var(--t2);text-decoration:none;
+  padding:5px 11px;border-radius:4px;border:1px solid var(--edge-soft);
+  transition:all .15s;
+}
+.cr-wb-link:hover{color:var(--t1);border-color:var(--t3);background:var(--panel)}
+.cr-gallery-main{
+  flex:1;max-width:1280px;width:100%;margin:0 auto;padding:28px 24px;
+}
+.cr-gallery-title-row{
+  display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:24px;
+}
+.cr-gallery-title{font-size:22px;font-weight:700;letter-spacing:-0.02em;margin:0}
+.cr-gallery-sub{font-size:12px;color:var(--t3);margin:3px 0 0 0}
+.cr-cards-grid{
+  display:grid;grid-template-columns:repeat(auto-fill, minmax(280px, 1fr));
+  gap:18px;align-items:start;
+}
+.cr-proj-card{
+  background:var(--panel);border:1px solid var(--edge);border-radius:7px;
+  overflow:hidden;cursor:pointer;transition:transform .15s, border-color .15s, box-shadow .15s;
+  display:flex;flex-direction:column;outline:none;
+}
+.cr-proj-card:hover{
+  border-color:var(--edge-soft);box-shadow:0 12px 28px rgba(0,0,0,0.4);
+  transform:translateY(-2px);
+}
+.cr-proj-card:focus-visible{
+  border-color:var(--orange);box-shadow:0 0 0 2px var(--orange-dim);
+}
+.cr-card-thumb-stage{
+  height:168px;background:var(--panel-2);display:flex;align-items:center;
+  justify-content:center;position:relative;border-bottom:1px solid var(--edge);
+  overflow:hidden;padding:12px;
+}
+.cr-card-preview-box{
+  height:100%;max-width:100%;border-radius:4px;background:var(--app);
+  border:1px solid var(--edge-soft);position:relative;display:flex;
+  align-items:center;justify-content:center;box-shadow:var(--sink);
+}
+.cr-preview-target-tag{
+  position:absolute;top:6px;left:6px;font-size:9.5px;font-weight:600;
+  padding:2px 6px;border-radius:3px;background:rgba(0,0,0,0.7);
+  border:1px solid rgba(255,255,255,0.08);color:var(--t2);backdrop-filter:blur(4px);
+}
+.cr-preview-size-tag{
+  position:absolute;bottom:6px;right:6px;font-family:var(--mono);font-size:9px;
+  padding:1px 5px;border-radius:2px;background:rgba(0,0,0,0.65);color:var(--t3);
+}
+.cr-preview-play-icon{
+  width:36px;height:36px;border-radius:50%;background:rgba(0,0,0,0.6);
+  border:1px solid rgba(255,255,255,0.12);display:flex;align-items:center;
+  justify-content:center;color:var(--t2);transition:all .15s;
+}
+.cr-proj-card:hover .cr-preview-play-icon{
+  color:var(--orange);background:var(--app);transform:scale(1.08);
+}
+.cr-card-body{padding:12px 14px;display:flex;flex-direction:column;gap:8px}
+.cr-card-title-row{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.cr-card-name{
+  font-size:13.5px;font-weight:600;color:var(--t1);white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis;
+}
+.cr-card-rev{
+  font-family:var(--mono);font-size:10px;color:var(--orange);
+  background:color-mix(in srgb, var(--orange) 12%, transparent);
+  padding:1px 5px;border-radius:3px;flex-shrink:0;
+}
+.cr-card-meta{
+  display:flex;align-items:center;gap:6px;font-size:11px;color:var(--t3);
+  font-family:var(--mono);
+}
+.cr-dot{width:3px;height:3px;border-radius:50%;background:var(--edge-soft)}
+.cr-card-actions{
+  display:flex;align-items:center;gap:5px;margin-top:6px;padding-top:8px;
+  border-top:1px solid var(--edge);
+}
+.cr-act-btn{
+  background:none;border:1px solid var(--edge-soft);border-radius:4px;
+  color:var(--t2);font-family:inherit;font-size:11px;padding:3px 7px;
+  cursor:pointer;transition:all .12s;
+}
+.cr-act-btn:hover{color:var(--t1);border-color:var(--t3);background:var(--panel-2)}
+.cr-act-btn.pri{
+  background:var(--edge);color:var(--t1);font-weight:600;
+}
+.cr-act-btn.pri:hover{border-color:var(--orange);color:var(--orange)}
+.cr-act-btn.del:hover{color:var(--red);border-color:var(--red)}
+.cr-empty-state{
+  border:1px dashed var(--edge-soft);border-radius:8px;padding:56px 20px;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  text-align:center;gap:12px;margin:32px 0;
+}
+.cr-empty-icon{color:var(--t3);opacity:0.7}
+.cr-empty-hdr{font-size:15px;font-weight:600;color:var(--t1);margin:0}
+.cr-empty-msg{font-size:12.5px;color:var(--t3);max-width:420px;margin:0;line-height:1.5}
+.cr-create-btn-inline{
+  margin-top:8px;background:var(--orange);color:var(--on-accent);border:0;
+  border-radius:5px;font-family:inherit;font-size:12.5px;font-weight:600;
+  padding:8px 18px;cursor:pointer;transition:filter .15s;
+}
+.cr-create-btn-inline:hover{filter:brightness(1.12)}
+.cr-ghost-btn{
+  background:var(--panel);border:1px solid var(--edge-soft);color:var(--t2);
+  border-radius:4px;padding:6px 14px;font:inherit;font-size:12px;cursor:pointer;
+}
+.cr-ghost-btn:hover{color:var(--t1);border-color:var(--t3)}
+.cr-loading-spinner{
+  width:24px;height:24px;border:2px solid var(--edge-soft);border-top-color:var(--orange);
+  border-radius:50%;animation:cr-spin .8s linear infinite;
+}
+@keyframes cr-spin{to{transform:rotate(360deg)}}
+.cr-bottom-bar{
+  position:fixed;bottom:24px;left:0;right:0;display:flex;justify-content:center;
+  pointer-events:none;z-index:30;
+}
+.cr-create-project-btn{
+  pointer-events:auto;background:var(--orange);color:var(--on-accent);
+  border:1px solid rgba(255,255,255,0.18);border-radius:24px;
+  font-family:inherit;font-size:13px;font-weight:600;padding:10px 24px;
+  display:flex;align-items:center;gap:8px;cursor:pointer;
+  box-shadow:0 8px 24px rgba(0,0,0,0.6), 0 0 0 1px rgba(0,0,0,0.4);
+  transition:transform .15s, filter .15s;
+}
+.cr-create-project-btn:hover{filter:brightness(1.12);transform:scale(1.03)}
+.cr-toast{
+  position:fixed;bottom:80px;left:50%;transform:translateX(-50%);
+  background:var(--panel-2);border:1px solid var(--edge-soft);color:var(--t1);
+  padding:8px 16px;border-radius:6px;font-size:12px;box-shadow:0 8px 20px rgba(0,0,0,0.6);
+  z-index:99;
+}
+`;

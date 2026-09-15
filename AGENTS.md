@@ -2,7 +2,7 @@
 
 # This is NOT the Next.js you know
 
-This version has breaking changes, APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+This version has breaking changes: APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
 
 This block is written and re-added by `next dev`, verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
 
@@ -61,6 +61,29 @@ early on some encoders. `npm run prove:layers` builds the two strips, reads
 the pixels back out of the rendered file and fails if any of that moves. Past
 `MAX_GATE_RUNS` runs the gate is dropped, the black comes back, and the export
 says so out loud.
+
+**`enable=` answers that question in time, and a track's SHAPE answers it in
+space.** A track above another one used to be built at the delivery size,
+which pads a picture of any other shape with black bars before anything lays
+it over the track below, and those bars are inside every frame the track is on
+screen for, where no gate can reach them. A square still over a vertical cut
+previewed clean and exported with black across the top and bottom of the
+programme, because the viewer draws an `img` with `object-fit: contain` and
+nothing behind it, so in the viewer there is nothing there to draw. So
+`trackShape` measures the box a track's own pictures occupy inside the frame
+and builds every segment of that track at it, filler included: no pad, no
+bars, nothing to lay over anything, and `placement` then fits that box inside
+`zoom` times the frame, which is the same picture the viewer draws. It takes
+every clip in range agreeing on one box, because a track is laid on as one
+layer. A clip with no size, a crop or a rotation that changes its shape after
+the cut, or two clips of different shapes all fall back to the delivery frame
+and say so in the export. An image had no size to report until recently:
+nothing measured a still, because a still never goes through the probe, so
+`importFile` reads the picture out of the file with `createImageBitmap`. A
+layer that is not the frame is folded with `overlay` and never handed to
+`ffmpeg/compose`, whose cells have no documented answer for a picture that
+does not fill one. `npm run check:delivery` compiles the demo project
+measured and unmeasured and fails if the two come out the same graph.
 
 **Every node that makes pictures states its length in frames, not seconds.**
 A compiled export came back 145 frames where the timeline said 144, and
@@ -142,6 +165,92 @@ else. So captions are written to an SRT, uploaded, and burned with libass:
 `exportTimeline` does the upload because the compiler is pure, and
 `npm run prove:captions` reads the pixels back out of the rendered file.
 
+**The render container has ONE font and it is DejaVu.** A caption that is
+perfect in the viewer comes out of the export as a row of empty boxes the
+moment it is not Latin, because the browser falls back through the whole
+machine's font book and the container has nothing to fall back to. Burning a
+line per script and reading the pixels back says it draws Latin, Greek,
+Cyrillic, Arabic, Hebrew, Armenian and Georgian, and draws boxes for every
+Indic script, Thai, Han, kana and Hangul. Emoji too, but only the ones that
+default to colour: `✅ ❌ 🔥` are boxes and `☺ ★ ✓` draw, which is the
+Emoji_Presentation line and not a block range. So `lib/subtitles/fonts.ts` decides
+which font the words need, `exportTimeline` uploads it, and the compiler does
+TWO things with it, either of which alone renders exactly the boxes it was
+meant to remove:
+
+  1. muxes the ttf into the SRT as an mkv attachment, because the subtitles
+     filter loads font attachments out of the file it is given and
+     `ffmpeg/custom` has no third wire to hand one over on;
+  2. names it in `force_style='FontName=...'`, because libass matches an
+     attachment by family and will NOT fall back to one for a missing glyph.
+
+The family is the font's own name table string, spaces and all: `Noto Sans
+Devanagari` works and `NotoSansDevanagari` matches nothing and says nothing.
+Both metadata tags on the attachment are load bearing too, matroska refuses
+one with no `filename` and the filter reads `mimetype` to decide an
+attachment is a font at all.
+
+`public/fonts` carries 18 Noto fonts for the scripts that were measured as
+broken. Two traps live in choosing them. The CJK three are the STATIC Regular
+builds from `notofonts/noto-cjk`, not the variable fonts from `google/fonts`:
+libass renders a variable font at its default instance and the CJK variable
+fonts default to wght 100, so those would have come out hairline rather than
+as boxes, which nothing here would have caught. And every bundled font has to
+carry Latin, because `force_style` names one font for the whole cue and the
+font drawing the Hindi also draws the English beside it.
+
+Which CJK font is not a count. Most of a Japanese sentence is Han, so counting
+hands Japanese to the Chinese font and draws it in Chinese letterforms; kana
+mean the Han beside them is Japanese, and Hangul mean it is Korean. Measured
+from the cmaps: SC has simplified, traditional, the Japan-only kanji and kana
+and no Hangul; JP has no simplified; KR has only Hangul of the three.
+
+`npm run prove:caption-font` renders it for a TrueType variable font and for a
+CFF OpenType, which are not the same file, and compares the caption band with
+`imagemagick/compare`: two identical renders answer exactly 0 and every real
+difference measured above 0.007. Do NOT read that against the 0.02 in
+compare's own summary, which is a sentence about photographs and fails every
+one of these on renders that are perfect. Nothing bundles an emoji font, so
+`✅` is still a box and still says so.
+
+**A render is as long as the PROGRAMME, not as long as the timeline.** An
+export came back four seconds longer than the cut with nothing in the tail.
+The length was the longest track of any kind, summed item by item, and three
+separate things reach past the last frame that carries anything: a gap left
+behind by a delete without ripple, a clip switched off at the end, and a
+subtitle cue sitting past the end of the footage. Every one of them was
+compiled into real generated black and welded onto the delivery. So
+`trackDuration` stops at the last item that is not a gap, because a gap
+between two clips is a length and a gap after the last one is the absence of
+one, and `programmeDuration` is the last frame carrying picture or sound,
+which is what `compile` builds to and what the export dialog shows. When the
+timeline still runs past it, because a cue or a disabled clip is genuinely
+drawn there, the export says so with both numbers rather than leaving it to be
+noticed at the end of a render. `playingTracks` lives in `document.ts` and the
+compiler imports it: which tracks play is one rule, and two copies of it would
+make a file as long as one of them and as full as the other.
+
+**`ffmpeg/transcode` takes a width and a height and does not say what shape it
+makes.** Letterbox, stretch and crop are all defensible readings of a width
+and a height that do not match the input's, and the schema picks none. It
+never came up while every export was 16:9 into 16:9, where the three are the
+same answer; a reel is the first time they differ. So the compiler stopped
+asking: `fitFrame` sets the delivery frame with a filter of ours, `contain` is
+`decrease` plus `pad` and `cover` is `increase` plus `crop`, and the transcode
+after it is handed a picture already at its own width and height. It runs
+BEFORE the subtitle burn, because libass draws into the frame it is handed and
+fitting afterwards shrinks the captions into the letterbox with the picture.
+It is skipped only when the shape is provably already right: a step upstream
+pinned the picture to the delivery frame (`Ref.frame`), or every clip in range
+reports a size and all of them have the delivery's aspect. A clip that never
+reported a size answers no, because the cost of a wrong yes is a stretched
+delivery nothing catches and the cost of a wrong no is one encode.
+`npm run check:delivery` compiles every destination the dialog offers, at both
+fits, and puts each graph to the server's validate, which stores nothing and
+is free. `npm run prove:vertical` renders two of them small and reads the top
+of the frame back: contain has a black bar there and cover does not, and
+either check alone would pass on a stretched picture.
+
 **Widening `TrackItem` does not fail everywhere it should.** Adding `Caption`
 made every place that assumed a closed union fail to compile except
 `itemDuration`, which fell through to `ZERO` and silently turned every caption
@@ -215,8 +324,11 @@ rename turns the test into a no-op that reports success forever.
     npm run prove:session    # remove a file, refresh the page, and see the project survive
     npm run cards            # every card's pipeline exists and takes what the plan binds
     npm run prove:captions   # a caption reaches the rendered pixels
+    npm run prove:caption-font      # Hindi comes out as words, not as boxes
     npm run prove:caption-playback  # press Play: the cues are on screen, in order
     npm run prove:caption-edit      # drag a cue, pull its edge, retype its words
+    npm run check:delivery   # every export destination compiles, on both sides, free
+    npm run prove:vertical   # a 16:9 cut as a 9:16 reel: bars for contain, none for cover
 
 Edit an intel card in `lib/intel/cards/*.md`, run `npm run intel`, then
 `npm test`, the eval suite runs the real router over 15 things a person would

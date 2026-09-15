@@ -58,7 +58,9 @@ export function runCase(c: EvalCase, cfg: RetrieveConfig = {}): CaseResult {
     case: c,
     got,
     ok: got === c.expect,
-    wrongRung: got === c.expect && r.plan!.rung !== c.rung,
+    // a case that wanted silence and got it has no plan to read a rung off,
+    // and `r.plan!` on that case is a crash rather than a failing test
+    wrongRung: Boolean(r.plan) && got === c.expect && r.plan!.rung !== c.rung,
     rung: r.plan?.rung ?? null,
     margin: r.plan?.margin ?? 0,
     fragile: Boolean(r.plan?.fragile),

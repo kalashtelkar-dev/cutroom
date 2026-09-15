@@ -99,7 +99,9 @@ export function useWorkbench(): WorkbenchStore {
   const [prompt, setPrompt] = useState('');
   const [strictLadder, setStrictLadder] = useState(false);
   const [cases, setCases] = useState<EvalCase[]>(SEED_CASES);
-  const [cardId, setCardId] = useState<string>('auto-broll-weave');
+  // the first card on the shelf, not a named one: the id that used to be
+  // here was archived and the editor opened on a card that does not exist
+  const [cardId, setCardId] = useState<string>(() => allCards()[0]?.id ?? '');
   const [revision, setRevision] = useState(0);
   const [resetToken, setResetToken] = useState(0);
   const [status, setStatus] = useState<string | null>(null);

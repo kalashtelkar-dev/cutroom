@@ -15,7 +15,7 @@ import { preflight, type Graph, type GraphNode } from '../lib/editor-api/graph.t
 import { emptyTimeline } from '../lib/timeline/document.ts';
 import { COMPOSITE_EFFECT, TRANSFORM_EFFECT } from '../lib/inspector/effects.ts';
 import { RATES, frames, timeRange, type Frames } from '../lib/time/frames.ts';
-import type { Clip, Gap, Timeline, Track, Transition } from '../lib/timeline/types.ts';
+import type { Clip, Gap, MediaRef, Timeline, Track, Transition } from '../lib/timeline/types.ts';
 import type { CompileOptions, CompileResult, DeliverySpec } from '../lib/compiler/types.ts';
 
 // ── fixtures ────────────────────────────────────────────────────────────
@@ -27,10 +27,15 @@ const HD: DeliverySpec = { width: 1920, height: 1080, container: 'mp4', reencode
 
 function doc(): Timeline {
   const t = emptyTimeline('tl_1', 'Test', RATE);
-  t.media.v1 = { key: 'v1', name: 'interview.mp4', kind: 'video', available: timeRange(F(0), F(9000)) };
-  t.media.v2 = { key: 'v2', name: 'broll.mov', kind: 'video', available: timeRange(F(0), F(9000)) };
+  // the pictures carry their size, exactly as an import writes it: without one
+  // the compiler cannot know the footage is already the delivery's shape and
+  // has to fit it to the frame itself, which is a node these tests would then
+  // be counting everywhere. `HD_FROM_VERTICAL` is where that is the point.
+  const hd = { width: 1920, height: 1080 };
+  t.media.v1 = { key: 'v1', name: 'interview.mp4', kind: 'video', available: timeRange(F(0), F(9000)), ...hd };
+  t.media.v2 = { key: 'v2', name: 'broll.mov', kind: 'video', available: timeRange(F(0), F(9000)), ...hd };
   t.media.a1 = { key: 'a1', name: 'music.wav', kind: 'audio', available: timeRange(F(0), F(9000)) };
-  t.media.png = { key: 'png', name: 'lower-third.png', kind: 'image', available: timeRange(F(0), F(1)) };
+  t.media.png = { key: 'png', name: 'lower-third.png', kind: 'image', available: timeRange(F(0), F(1)), ...hd };
   t.media.srt = { key: 'srt', name: 'captions.srt', kind: 'video', available: timeRange(F(0), F(9000)) };
   return t;
 }
@@ -309,7 +314,7 @@ describe('a picture track shows through the gaps in the track above it', () => {
     // frames 30 to 120 at 30fps, half a frame either side so each boundary
     // falls between two samples instead of on one
     assert.equal(gateOf(r.graph, layer.id), 'between(t,0.983333,3.983333)');
-    assert.match(filterOf(r.graph, layer.id), /\[base\]\[top\]overlay=x=0:y=0:enable=/);
+    assert.match(filterOf(r.graph, layer.id), /\[base\]\[top\]overlay=x=\(W-w\)\/2:y=\(H-h\)\/2:enable=/);
     assert.equal(
       r.warnings.filter((w) => /black over the track below/.test(w.message)).length, 0,
       'there is no black over the track below to warn about any more',
@@ -336,8 +341,8 @@ describe('a picture track shows through the gaps in the track above it', () => {
       '[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,'
       + 'pad=1920:1080:(ow-iw)/2:(oh-ih)/2,fps=30,format=yuv420p[base];'
       + '[1:v]scale=1920:1080:force_original_aspect_ratio=decrease,'
-      + 'pad=1920:1080:(ow-iw)/2:(oh-ih)/2,fps=30,format=yuv420p[top];'
-      + "[base][top]overlay=x=0:y=0:enable='between(t,0.983333,3.983333)',"
+      + 'setsar=1,fps=30,format=yuv420p[top];'
+      + "[base][top]overlay=x=(W-w)/2:y=(H-h)/2:enable='between(t,0.983333,3.983333)',"
       // the last frame is held and then cut to an exact count, because a
       // measured blend of two 144 frame layers came back with 143
       + 'tpad=stop_mode=clone:stop_duration=1,format=yuv420p[v]',
@@ -643,6 +648,166 @@ describe('a clip that was moved or scaled is rendered where the viewer draws it'
   });
 });
 
+// ── the shape a layer is built at ───────────────────────────────────────
+// A track above another one used to be built at the delivery size, which pads
+// a picture of any other shape with black bars before anything lays it over
+// the track below. `enable=` answers the same question in time and cannot
+// answer it in space: the bars are inside every frame the track is on screen
+// for. The viewer never showed them, because it draws an `img` with
+// `object-fit: contain` and nothing behind it, so a square logo over a
+// vertical cut previewed clean and exported with black across the top and
+// bottom of the programme.
+
+describe('an upper track is built at the box its own pictures occupy', () => {
+  const REEL: DeliverySpec = { width: 1080, height: 1920, container: 'mp4', reencode: true };
+
+  /** A square still on V2, starting a second in, over a vertical cut on V1. */
+  function overlaid(image: Partial<MediaRef> = { width: 1500, height: 1500 }): Timeline {
+    const t = doc();
+    t.media.square = {
+      key: 'square', name: 'logo.png', kind: 'image',
+      available: timeRange(F(0), F(1)), ...image,
+    } as MediaRef;
+    t.media.v1 = { ...t.media.v1, width: 1080, height: 1920 };
+    t.tracks[V1].items = [clip('under', 'v1', 0, 300)];
+    t.tracks[V2].items = [gap('pad', 30), clip('logo', 'square', 0, 90)];
+    return t;
+  }
+
+  /** The `-vf` chain `still()` was given, which is where the pad used to be. */
+  const stillFilter = (g: Graph): string => {
+    const node = nodesOf(g, 'ffmpeg/custom')
+      .find((n) => engineParams(g, n.id).output === 'still.mp4');
+    assert.ok(node, 'the image on V2 is held as a still');
+    const args = customArgs(g, node.id);
+    return args[args.indexOf('-vf') + 1];
+  };
+
+  const fillerSizes = (g: Graph): string[] =>
+    paramsOf(g, 'ffmpeg/synthetic').map((p) => `${p.width}x${p.height}`);
+
+  test('a square still over a vertical cut is never padded to the frame', () => {
+    const r = run(overlaid(), { delivery: REEL });
+    assertCompiles(r.graph, 'a square still on an upper track');
+
+    // 1500x1500 contained in 1080x1920 is 1080x1080, and that is the whole
+    // strip: no pad means no black to lay over V1
+    assert.equal(stillFilter(r.graph), 'scale=1080:1080,format=yuv420p');
+    assert.deepEqual(fillerSizes(r.graph), ['1080x1080', '1080x1080'],
+      'the filler either side of it matches the picture, not the frame');
+    for (const p of fitNodes(r.graph)) {
+      // \b, because `tpad=` holds the last frame and is not a border
+      assert.ok(!/\bpad=/.test(String(p.args)), 'nothing on this track is padded to the frame');
+    }
+    assert.deepEqual(r.warnings, [], 'a measured track has nothing to apologise for');
+  });
+
+  test('the layer is scaled from that box, so it lands where the viewer draws it', () => {
+    const t = overlaid();
+    (t.tracks[V2].items[1] as Clip).effects = [
+      { kind: TRANSFORM_EFFECT, params: { zoom: 0.89, posX: 0, posY: -140, rotation: 0 }, enabled: true },
+    ];
+    const r = run(t, { delivery: REEL });
+    assertCompiles(r.graph, 'a placed square still');
+    const filter = filterOf(r.graph, layerNodes(r.graph)[0].id);
+    // the top is fitted into 0.89 of the frame and centred, and the 1080x1080
+    // strip has nothing in it but the picture
+    assert.match(filter, /\[1:v\]scale=961:1709:force_original_aspect_ratio=decrease/);
+    assert.ok(!/\[1:v\][^;]*\bpad=/.test(filter), 'the top is never padded');
+    assert.match(filter, /overlay=x=\(W-w\)\/2:y=\(H-h\)\/2-538/);
+  });
+
+  test('the bottom layer is still built at the delivery frame', () => {
+    // it has nothing under it, so what it does not fill is black either way,
+    // and the delivery expects a picture the size of the frame
+    const t = overlaid();
+    t.tracks[V1].items = [clip('a', 'v1', 0, 150), gap('hole', 30), clip('b', 'v1', 150, 120)];
+    const r = run(t, { delivery: REEL });
+    assertCompiles(r.graph, 'a gapped bottom track');
+    assert.ok(
+      fillerSizes(r.graph).includes('1080x1920'),
+      'the gap in V1 is black at the frame size',
+    );
+  });
+
+  test('a picture with no size is fitted to the frame, and the export says so', () => {
+    const r = run(overlaid({}), { delivery: REEL });
+    assertCompiles(r.graph, 'an unmeasured still');
+    assert.match(stillFilter(r.graph), /pad=1080:1920/, 'there is nothing else it can do');
+    const said = r.warnings.filter((w) => /laid over the track below as black/.test(w.message));
+    assert.equal(said.length, 1, 'the one thing that must not happen quietly');
+    assert.match(said[0].message, /"logo" does not report a picture size/);
+  });
+
+  test('clips of two shapes on one track fall back to the frame and say why', () => {
+    const t = overlaid();
+    t.media.wide = {
+      key: 'wide', name: 'card.png', kind: 'image',
+      available: timeRange(F(0), F(1)), width: 1920, height: 1080,
+    } as MediaRef;
+    t.tracks[V2].items = [clip('logo', 'square', 0, 90), clip('card', 'wide', 0, 90)];
+    const r = run(t, { delivery: REEL });
+    assertCompiles(r.graph, 'two shapes on one upper track');
+    assert.match(stillFilter(r.graph), /pad=1080:1920/);
+    assert.ok(r.warnings.some((w) => /different shapes/.test(w.message)));
+  });
+
+  test('an effect that may change the shape is not a measurable shape', () => {
+    // an effect names any operation in the catalogue that takes one input and
+    // returns one file, so the list of ones that resize is not knowable and
+    // anything outside the handful that provably do not counts as a resize
+    const t = overlaid();
+    (t.tracks[V2].items[1] as Clip).effects = [
+      { kind: 'ffmpeg/rotate', params: { degrees: '90' }, enabled: true },
+    ];
+    const r = run(t, { delivery: REEL });
+    assertCompiles(r.graph, 'a rotated still');
+    assert.match(stillFilter(r.graph), /pad=1080:1920/);
+    assert.ok(r.warnings.some((w) => /may change its shape after the cut/.test(w.message)));
+  });
+
+  test('speed and volume are not reasons to give up the box', () => {
+    const t = overlaid();
+    (t.tracks[V2].items[1] as Clip).effects = [
+      { kind: 'volume', params: { gainDb: -6 }, enabled: true },
+      { kind: 'speed', params: { factor: 2 }, enabled: true },
+    ];
+    const r = run(t, { delivery: REEL });
+    assertCompiles(r.graph, 'a still with time and level on it');
+    assert.equal(stillFilter(r.graph), 'scale=1080:1080,format=yuv420p');
+  });
+
+  test('a picture too thin to lay out falls back rather than stretching', () => {
+    const r = run(overlaid({ width: 4, height: 4000 }), { delivery: REEL });
+    assertCompiles(r.graph, 'a sliver');
+    assert.match(stillFilter(r.graph), /pad=1080:1920/);
+    assert.ok(r.warnings.some((w) => /too thin to lay out/.test(w.message)));
+  });
+
+  test('a layer that is not the frame is folded, never handed to compose', () => {
+    // ffmpeg/compose arranges cells and the compiler does not know what it
+    // puts around one that does not fill the canvas. A wrong guess there is
+    // the black this shape exists to remove.
+    const t = overlaid();
+    t.tracks[V2].items = [clip('logo', 'square', 0, 300)]; // covers everything: no gate
+    const r = run(t, { delivery: REEL });
+    assertCompiles(r.graph, 'an ungated off-frame layer');
+    assert.equal(nodesOf(r.graph, 'ffmpeg/compose').length, 0);
+    assert.equal(layerNodes(r.graph).length, 1);
+  });
+
+  test('a track the same shape as the frame still composes', () => {
+    // the cheap path is not given up for nothing
+    const t = doc();
+    t.tracks[V1].items = [clip('under', 'v1', 0, 300)];
+    t.tracks[V2].items = [clip('over', 'v2', 0, 300)];
+    const r = run(t);
+    assertCompiles(r.graph, 'two full frame tracks');
+    assert.equal(nodesOf(r.graph, 'ffmpeg/compose').length, 1);
+    assert.deepEqual(r.warnings, []);
+  });
+});
+
 describe('an empty track is not the same as a track outside the range', () => {
   test('a track holding nothing but a gap says nothing', () => {
     const t = doc();
@@ -873,7 +1038,10 @@ describe('reencode', () => {
     // values of reencode, with ffmpeg's EINVAL and no diagnostics, which is
     // the render failure this test was written the wrong way round for.
     // Proved by npm run prove:concat.
-    t.tracks[V1].items = [clip('a', 'v1', 0, 60), gap('g', 30)];
+    // the gap leads rather than trails: a gap after the last clip is not part
+    // of the programme any more, so a trailing one would be trimmed off and
+    // there would be no mixed join left to test
+    t.tracks[V1].items = [gap('g', 30), clip('a', 'v1', 0, 60)];
     const r = run(t, { delivery: { ...HD, reencode: false } });
     assertCompiles(r.graph, 'mixed join');
     assert.equal(paramsOf(r.graph, 'ffmpeg/concat')[0].reencode, false, 'always the demuxer');
@@ -1055,7 +1223,11 @@ describe('a document the compiler cannot honour warns instead of guessing', () =
 
   test('a disabled clip holds its time open rather than shifting the cut', () => {
     const t = doc();
-    t.tracks[V1].items = [clip('a', 'v1', 0, 60), clip('off', 'v1', 600, 60, { enabled: false })];
+    // the switched off clip sits BEFORE the live one, so what it holds open is
+    // visible in where the cut lands. Trailing, it would hold nothing open:
+    // there is nothing after it to be moved, and the programme now ends at the
+    // last clip that actually plays
+    t.tracks[V1].items = [clip('off', 'v1', 600, 60, { enabled: false }), clip('a', 'v1', 0, 60)];
     const r = run(t);
     assertCompiles(r.graph, 'disabled clip');
     assert.equal(nodesOf(r.graph, 'ffmpeg/trim').length, 1);
@@ -1558,5 +1730,236 @@ describe('subtitles are one burned in file', () => {
     const r = run(t, { burnSubtitles: true });
     assertCompiles(r.graph, 'one subtitle file on two clips');
     assert.deepEqual(r.warnings, []);
+  });
+
+  /**
+   * The font, when the render container has no glyph for the words.
+   *
+   * Both halves are asserted separately because either one alone renders
+   * exactly the boxes it was meant to remove: an attachment nothing names is
+   * ignored, and a name with no attachment behind it matches nothing.
+   */
+  describe('burning captions in a script the server cannot draw', () => {
+    const FONT = { key: 'obj/font.ttf', family: 'Noto Sans Devanagari', file: 'NotoSansDevanagari.ttf' };
+
+    const withFont = (): CompileResult => {
+      const t = doc();
+      t.tracks[V1].items = [clip('pic', 'v1', 0, 60)];
+      return run(t, { burnSubtitles: true, subtitleKey: 'obj/captions.srt', subtitleFont: FONT });
+    };
+
+    const muxNode = (g: Graph): Record<string, unknown> | undefined =>
+      paramsOf(g, 'ffmpeg/custom').find((p) => p.output === 'captions.mkv');
+    const burnNode = (g: Graph): Record<string, unknown> | undefined =>
+      paramsOf(g, 'ffmpeg/custom').find((p) => p.output === 'subtitled.mp4');
+
+    test('the font is muxed into the subtitle file as an attachment', () => {
+      const r = withFont();
+      assertCompiles(r.graph, 'captions burned with a font');
+      const args = muxNode(r.graph)?.args as string[];
+      assert.ok(args, 'no node muxes the font into the captions');
+      assert.deepEqual(args.slice(0, 4), ['-i', '{in0}', '-attach', '{in1}']);
+      // matroska refuses an attachment with no filename, and the subtitles
+      // filter reads the mimetype to decide an attachment is a font at all
+      assert.ok(args.includes('mimetype=application/x-truetype-font'));
+      assert.ok(args.includes('filename=NotoSansDevanagari.ttf'));
+    });
+
+    test('the burn names the font, because libass will not fall back to it', () => {
+      const args = burnNode(withFont().graph)?.args as string[];
+      assert.ok(args.includes("subtitles={in1}:force_style='FontName=Noto Sans Devanagari'"));
+    });
+
+    test('the burn reads the mkv, not the srt it was made from', () => {
+      const r = withFont();
+      const burn = nodesOf(r.graph, 'ffmpeg/custom')
+        .find((n) => engineParams(r.graph, n.id).output === 'subtitled.mp4');
+      const mux = nodesOf(r.graph, 'ffmpeg/custom')
+        .find((n) => engineParams(r.graph, n.id).output === 'captions.mkv');
+      assert.ok(burn && mux);
+      assert.ok(
+        r.graph.edges.some((e) => e.from.node === mux.id && e.to.node === burn.id),
+        'the font would be attached to a file nothing burns',
+      );
+    });
+
+    test('the font enters the graph as a file:document, which is what custom takes', () => {
+      const r = withFont();
+      assert.ok(r.graph.nodes.some((n) => n.kind === 'input' && n.type === 'file:document'));
+      assert.ok(Object.values(r.inputs).includes('obj/font.ttf'), 'the run would not carry the font');
+    });
+
+    test('no font means no mux and no style: Latin needs neither', () => {
+      const t = doc();
+      t.tracks[V1].items = [clip('pic', 'v1', 0, 60)];
+      const r = run(t, { burnSubtitles: true, subtitleKey: 'obj/captions.srt' });
+      assertCompiles(r.graph, 'captions burned with the server font');
+      assert.equal(muxNode(r.graph), undefined);
+      assert.ok((burnNode(r.graph)?.args as string[]).includes('subtitles={in1}'));
+    });
+  });
+});
+
+// ── the delivery frame ──────────────────────────────────────────────────
+
+/**
+ * Vertical delivery.
+ *
+ * `ffmpeg/transcode` takes a width and a height and says nothing about what
+ * it does when their shape is not its input's. Letterbox, stretch and crop
+ * are all defensible readings and the schema picks none, which did not matter
+ * while every export was 16:9 into 16:9, where the three agree. A reel is the
+ * first time they do not, so the compiler stopped asking and does the
+ * geometry itself. These tests are what says it still does.
+ */
+describe('footage that is not the shape of the frame it is going into', () => {
+  const REEL: DeliverySpec = { width: 1080, height: 1920, container: 'mp4', reencode: true };
+
+  /** The ffmpeg/custom nodes that put the programme in the delivery frame. */
+  const frameNodes = (g: Graph): GraphNode[] =>
+    nodesOf(g, 'ffmpeg/custom').filter((n) => String(engineParams(g, n.id).output ?? '').startsWith('frame.'));
+
+  const oneShot = (): Timeline => {
+    const t = doc();
+    t.tracks[V1].items = [clip('a', 'v1', 0, 60)];
+    return t;
+  };
+
+  test('16:9 into 16:9 is a resize whichever way it is read, so nothing is added', () => {
+    const r = run(oneShot(), { delivery: HD });
+    assert.equal(frameNodes(r.graph).length, 0);
+    assert.equal(paramsOf(r.graph, 'ffmpeg/transcode')[0].width, 1920);
+  });
+
+  test('16:9 into 9:16 is fitted here, and the transcode is handed its own size', () => {
+    const r = run(oneShot(), { delivery: REEL });
+    assertCompiles(r.graph, 'a reel');
+    const fits = frameNodes(r.graph);
+    assert.equal(fits.length, 1, 'once for the whole programme, not once per clip');
+    const filter = filterOf(r.graph, fits[0].id);
+    assert.match(filter, /scale=1080:1920:force_original_aspect_ratio=decrease/);
+    assert.match(filter, /pad=1080:1920/, 'the whole picture, with bars where it does not reach');
+    assert.doesNotMatch(filter, /crop=/, 'contain is the default: nothing is thrown away');
+    const out = paramsOf(r.graph, 'ffmpeg/transcode')[0];
+    assert.equal(out.width, 1080);
+    assert.equal(out.height, 1920);
+  });
+
+  test('cover fills the frame and loses what falls outside it', () => {
+    const r = run(oneShot(), { delivery: { ...REEL, fit: 'cover' } });
+    assertCompiles(r.graph, 'a cropped reel');
+    const filter = filterOf(r.graph, frameNodes(r.graph)[0].id);
+    assert.match(filter, /scale=1080:1920:force_original_aspect_ratio=increase/);
+    assert.match(filter, /crop=1080:1920/);
+    assert.doesNotMatch(filter, /pad=/, 'a filled frame has no bars to pad');
+  });
+
+  /**
+   * The half that cannot pass by accident.
+   *
+   * The skip is an optimisation and the only thing it may ever do is save an
+   * encode. A clip whose media never reported a size is not evidence that the
+   * shapes agree, and reading it as one would ship whatever the server does
+   * with a mismatched width and height, unseen.
+   */
+  test('footage of unknown size is fitted rather than assumed to be right', () => {
+    const t = oneShot();
+    delete t.media.v1.width;
+    delete t.media.v1.height;
+    assert.equal(frameNodes(run(t, { delivery: HD }).graph).length, 1);
+  });
+
+  test('one clip of the wrong shape is enough, however many are the right one', () => {
+    const t = doc();
+    t.media.v2 = { ...t.media.v2, width: 1080, height: 1920 };
+    t.tracks[V1].items = [clip('a', 'v1', 0, 60), clip('b', 'v2', 0, 60)];
+    assert.equal(frameNodes(run(t, { delivery: HD }).graph).length, 0,
+      'a mixed join is already brought to the delivery frame to be joined at all');
+  });
+
+  /**
+   * Order, and the reason it is not a detail.
+   *
+   * libass draws into the frame it is handed. Burning first and fitting
+   * afterwards shrinks the captions into the letterbox along with the picture
+   * and leaves them a third of the size they were asked for, which is a
+   * caption nobody can read in a file that looks otherwise correct.
+   */
+  test('the frame is set before the captions are burned into it', () => {
+    const t = oneShot();
+    t.tracks.push(subtitleTrack([clip('s', 'srt', 0, 60)]));
+    const r = run(t, { delivery: REEL, burnSubtitles: true });
+    assertCompiles(r.graph, 'a subtitled reel');
+    const burn = nodesOf(r.graph, 'ffmpeg/custom')
+      .filter((n) => String(engineParams(r.graph, n.id).output ?? '').startsWith('subtitled.'));
+    assert.equal(burn.length, 1);
+    assert.deepEqual(
+      inputsInto(r.graph, burn[0].id, 'input').filter((id) => frameNodes(r.graph).some((f) => f.id === id)).length,
+      1,
+      'the burn reads the fitted picture, not the one before it',
+    );
+  });
+});
+
+// ── how long the file is ────────────────────────────────────────────────
+
+/**
+ * An export came back four seconds longer than the cut, with nothing in them.
+ *
+ * The length was the longest track of any kind, summed item by item, so a gap
+ * left behind by a delete was compiled into real generated black and welded
+ * to the end of the delivery. `programmeDuration` is the last frame that
+ * carries picture or sound and the render stops there.
+ */
+describe('a render is as long as the programme, not as long as the timeline', () => {
+  test('a gap left at the end of a track is not encoded', () => {
+    const t = doc();
+    t.tracks[V1].items = [clip('a', 'v1', 0, 60), gap('g', 120)];
+    const r = run(t);
+    assertCompiles(r.graph, 'a trailing gap');
+    assert.equal(nodesOf(r.graph, 'ffmpeg/synthetic').length, 0, 'no black was generated for it');
+    near(paramsOf(r.graph, 'ffmpeg/transcode')[0].durationSec as number, 2, 'the delivered length');
+  });
+
+  /**
+   * When the timeline still shows length the render will not have.
+   *
+   * A trailing gap needs no warning: it stopped being the track's length too,
+   * so the ruler and the file agree and there is nothing to explain. A cue or
+   * a switched off clip past the last frame of footage is different. It is
+   * drawn on the timeline, it is genuinely there, and the delivered file
+   * stops before it, so that difference is said out loud with both numbers in
+   * it rather than left to be discovered by watching the end of a render.
+   */
+  test('a timeline that outruns its programme says so, with both numbers', () => {
+    const t = doc();
+    t.tracks[V1].items = [clip('a', 'v1', 0, 60)];
+    t.tracks.push(subtitleTrack([clip('s', 'srt', 0, 300)]));
+    const w = run(t).warnings.filter((x) => /the timeline runs to/.test(x.message));
+    assert.equal(w.length, 1, 'said once');
+    assert.match(w[0].message, /00:00:10:00.*00:00:02:00.*00:00:08:00/, 'so it can be checked');
+  });
+
+  test('a trailing gap needs no warning, because the timeline stopped claiming it too', () => {
+    const t = doc();
+    t.tracks[V1].items = [clip('a', 'v1', 0, 60), gap('g', 120)];
+    assert.deepEqual(run(t).warnings.filter((x) => /the timeline runs to/.test(x.message)), []);
+  });
+
+  test('a gap in the middle is still real black, because something comes after it', () => {
+    const t = doc();
+    t.tracks[V1].items = [clip('a', 'v1', 0, 60), gap('g', 120), clip('b', 'v1', 600, 60)];
+    const r = run(t);
+    assert.equal(nodesOf(r.graph, 'ffmpeg/synthetic').length, 1);
+    near(paramsOf(r.graph, 'ffmpeg/transcode')[0].durationSec as number, 8);
+  });
+
+  test('a subtitle cue past the end of the footage buys no black to put it on', () => {
+    const t = doc();
+    t.tracks[V1].items = [clip('a', 'v1', 0, 60)];
+    t.tracks.push(subtitleTrack([clip('s', 'srt', 0, 300)]));
+    const r = run(t, { burnSubtitles: true });
+    assertCompiles(r.graph, 'a long caption track');
+    near(paramsOf(r.graph, 'ffmpeg/transcode')[0].durationSec as number, 2);
   });
 });

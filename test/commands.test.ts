@@ -1,7 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCommands, groupMenu, type Actions } from '../lib/commands/registry.ts';
-import { MENUS, isEnabled, type CommandContext } from '../lib/commands/types.ts';
+import { buildCommands, type Actions } from '../lib/commands/registry.ts';
+import { isEnabled, type CommandContext } from '../lib/commands/types.ts';
 import { matchShortcut, formatShortcut, shouldHandle } from '../lib/commands/shortcuts.ts';
 import { demoProject } from '../lib/fixtures/project.ts';
 import { findClip } from '../lib/timeline/document.ts';
@@ -26,6 +26,7 @@ function actions(): Actions & { calls: string[] } {
     bladeAtPlayhead: rec('blade'), rippleDelete: rec('ripple'),
     addTrack: rec('addTrack'), zoomFit: rec('fit'), zoomIn: rec('in'), zoomOut: rec('out'),
     openWorkbench: rec('workbench'), openJobs: rec('jobs'), selectAll: rec('all'),
+    showShortcuts: rec('shortcuts'),
     notify: rec('notify'),
   };
 }
@@ -48,10 +49,30 @@ describe('the command registry', () => {
     assert.equal(new Set(ids).size, ids.length);
   });
 
-  test('every command belongs to a menu that exists', () => {
-    const known = new Set(MENUS.map((m) => m.id));
-    const strays = commands.filter((c) => !known.has(c.menu)).map((c) => c.id);
-    assert.deepEqual(strays, []);
+  /**
+   * There is no menu bar, so a command with no key needs a control, and the
+   * registry cannot see controls.
+   *
+   * So the ones without a key are named here with where they are clicked
+   * instead. The list is the point: it is what stops a new keyless command
+   * being added and reaching nothing at all, which under a menu bar was
+   * impossible and now is one line of carelessness. A command that appears
+   * here has to come and say where it lives.
+   */
+  test('a command with no key is one with a control, and says which', () => {
+    const CLICKED_INSTEAD: Record<string, string> = {
+      'clip.enable': 'right-click a clip: ClipContextMenu',
+      'timeline.addVideo': 'the + button in the track headers',
+      'timeline.addAudio': 'the + button in the track headers',
+      'timeline.addSubtitle': 'the + button in the track headers',
+      'timeline.linked': "the timeline toolbar's gear",
+    };
+    const mute = commands.filter((c) => !c.shortcut).map((c) => c.id).sort();
+    assert.deepEqual(
+      mute,
+      Object.keys(CLICKED_INSTEAD).sort(),
+      'a command with neither a key nor a named control cannot be run at all',
+    );
   });
 
   test('no two commands claim the same shortcut', () => {
@@ -67,10 +88,6 @@ describe('the command registry', () => {
     assert.deepEqual(clashes, []);
   });
 
-  test('every menu has at least one command, so no menu opens empty', () => {
-    const empty = MENUS.filter((m) => !commands.some((c) => c.menu === m.id)).map((m) => m.id);
-    assert.deepEqual(empty, []);
-  });
 });
 
 describe('a shortcut that is printed is a shortcut that fires', () => {
@@ -174,22 +191,6 @@ describe('running a command does the thing', () => {
     const selected = findClip(demoProject(), 'clp_redrock_talent_3');
     commands.find((c) => c.id === 'clip.enable')!.run(ctx({ selected }));
     assert.deepEqual(a.calls, ['edit:Disable clip']);
-  });
-});
-
-describe('menus group for separators rather than running together', () => {
-  const commands = buildCommands(actions());
-
-  test('File splits project, media and inspection', () => {
-    const groups = groupMenu(commands, 'file');
-    assert.equal(groups.length, 3);
-    assert.deepEqual(groups[0].map((c) => c.id.split('.')[1]), ['new', 'open', 'save', 'saveAs']);
-  });
-
-  test('destructive things sit apart from safe ones', () => {
-    const groups = groupMenu(commands, 'edit');
-    const last = groups.at(-1)!;
-    assert.deepEqual(last.map((c) => c.id), ['edit.delete']);
   });
 });
 

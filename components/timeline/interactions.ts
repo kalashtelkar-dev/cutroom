@@ -758,6 +758,47 @@ export const laneHeight = (t: Track): number => TRACK_HEIGHT[t.kind];
 export const lanesHeight = (boxes: readonly LaneBox[]): number =>
   boxes.reduce((h, b) => h + b.height, 0);
 
+// ── how tall the timeline panel wants to be ─────────────────────────────
+
+/** The timeline's own toolbar, above the ruler. Read by `Timeline`. */
+export const TIMELINE_TOOLBAR_HEIGHT = 34;
+/** The ruler, above the lanes. Read by `Ruler` and by `TrackHeaders`. */
+export const RULER_HEIGHT = 25;
+/**
+ * Ground under the last lane.
+ *
+ * Not decoration: clicking the ground clears the selection, so there has to
+ * be some of it, and a last track flush against the bottom of the window
+ * reads as a track that has been cut off.
+ */
+export const TIMELINE_TAIL = 26;
+/** Small enough to be a glance at the cut, tall enough to still be a timeline. */
+export const TIMELINE_MIN_HEIGHT = 150;
+/** What the viewer keeps, however many tracks there are. */
+export const VIEWER_MIN_HEIGHT = 260;
+
+/**
+ * How tall the timeline should be for the tracks it is holding.
+ *
+ * It used to open at 42% of the window whatever was in it, so a four track
+ * cut sat above a hand's width of empty ground and the viewer had lost that
+ * space to hold it. Every lane is a known height for its kind, so the panel
+ * is the sum of the ones that exist plus its own chrome: adding a video track
+ * grows it by 68 and an audio track by 46, which is what "the timeline gets
+ * bigger when you add a track" has to mean if the numbers are to agree.
+ *
+ * The hairline is the toolbar's bottom border, counted because it is between
+ * the toolbar and the ruler and everything here is measured in whole pixels.
+ */
+export function fitTimelineHeight(tracks: readonly Track[], viewportH: number): number {
+  const chrome = TIMELINE_TOOLBAR_HEIGHT + 1 + RULER_HEIGHT + TIMELINE_TAIL;
+  const wanted = chrome + lanesHeight(laneBoxes(tracks));
+  // never at the viewer's expense: past this many tracks the lanes scroll,
+  // which is what every other editor does with more tracks than screen
+  const ceiling = Math.max(TIMELINE_MIN_HEIGHT, Math.round(viewportH) - VIEWER_MIN_HEIGHT);
+  return Math.max(TIMELINE_MIN_HEIGHT, Math.min(wanted, ceiling));
+}
+
 /**
  * Which lane a y offset is over. Half-open, like everything else: the pixel a
  * lane's border sits on belongs to the lane below, so dropping a clip exactly

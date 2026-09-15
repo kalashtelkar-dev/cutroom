@@ -35,11 +35,12 @@ import { Ruler } from './Ruler.tsx';
 import { TrackHeaders } from './TrackHeaders.tsx';
 import { ClipContextMenu, type ContextAction } from './ClipContextMenu.tsx';
 import { addTransitionOps, removeTransitionOps } from '../../lib/timeline/transitions.ts';
+import { tip } from '../ui/Tooltip.tsx';
 import { useTimelineView } from './useTimelineView.ts';
 import {
   bladeOps, dragMove, framesToPx, laneAtY, laneBoxes, lanesHeight, marqueeBox, marqueeHits,
   moveOps, nearestEdge, nextEdge, playheadLimit, pxToFrameAt, rippleDeleteOps, snapTolerance,
-  trimClip, trimOps, type TrimEdge,
+  snapValue, trimClip, trimOps, TIMELINE_TOOLBAR_HEIGHT, type TrimEdge,
   captionOps, captionSpan, captionTextOps, dragCaption, trimCaption,
   type CaptionDragResult, type CaptionSpan,
 } from './interactions.ts';
@@ -95,6 +96,14 @@ export interface TimelineProps {
    * versa. When false, each clip is independent.
    */
   linked?: boolean;
+  /**
+   * Set by the timeline's own gear. Left off, the toggle still draws and
+   * still reports, which would be a control that lies, so the gear item is
+   * only offered when the owner can actually take the change.
+   */
+  onLinkedChange?: (next: boolean) => void;
+  /** Opens the keyboard shortcut sheet, which the gear is the way into. */
+  onShowShortcuts?: () => void;
 }
 
 export interface TimelineControls {
@@ -167,7 +176,7 @@ export function Timeline({
   timeline, onEdit, selection, onSelectionChange, onPlayheadChange,
   newId = defaultNewId, initialPlayhead = ZERO,
   onNotify, snapping: snappingProp, onSnappingChange, onControls,
-  controller, linked = true,
+  controller, linked = true, onLinkedChange, onShowShortcuts,
 }: TimelineProps) {
   const view = useTimelineView(timeline, HEADER_WIDTH);
   const { reveal, scrollRef, zoomAt } = view;
@@ -258,6 +267,23 @@ export function Timeline({
     el.style.display = 'block';
     el.style.transform = `translate3d(${framesToPx(hit, view.ppf)}px,0,0)`;
   }, [view.ppf]);
+
+  const handleScrub = useCallback((at: Frames) => {
+    if (snapping) {
+      const targets = snapTargets(timeline);
+      const tol = snapTolerance(view.ppf);
+      const r = snapValue(at, targets, tol);
+      playhead.seek(r.value);
+      showSnapLine(r.hit);
+    } else {
+      playhead.seek(at);
+      showSnapLine(null);
+    }
+  }, [timeline, view.ppf, snapping, playhead, showSnapLine]);
+
+  const handleScrubEnd = useCallback(() => {
+    showSnapLine(null);
+  }, [showSnapLine]);
 
   // ── blade ─────────────────────────────────────────────────────────────
 
@@ -768,9 +794,11 @@ export function Timeline({
         setSnapping={setSnapping}
         positionLock={positionLock}
         setPositionLock={setPositionLock}
+        linked={linked}
+        onLinkedChange={onLinkedChange}
+        onShowShortcuts={onShowShortcuts}
         playing={playing}
         onPlay={() => playhead.toggle()}
-        onBlade={bladeAtPlayhead}
         onRipple={rippleDeleteSelection}
         onMarker={addMarker}
         onFit={view.fit}
@@ -823,7 +851,8 @@ export function Timeline({
                 width={laneContentWidth}
                 visible={view.visible}
                 markers={timeline.markers}
-                onScrub={(at) => playhead.seek(at)}
+                onScrub={handleScrub}
+                onScrubEnd={handleScrubEnd}
                 onMarkerPick={(m) => playhead.seek(m.at)}
                 onAddMarker={(at) => addMarker(at)}
                 onRemoveMarker={removeMarker}
@@ -980,7 +1009,14 @@ export function Timeline({
               }}
             />
 
-            <Playhead controller={playhead} ppf={view.ppf} dynamic={mode === 'dynamic'} />
+            <Playhead
+              controller={playhead}
+              ppf={view.ppf}
+              dynamic={mode === 'dynamic'}
+              onScrub={handleScrub}
+              onScrubEnd={handleScrubEnd}
+              frameAtClientX={frameAtClientX}
+            />
           </div>
         </div>
       </div>
@@ -1079,10 +1115,19 @@ interface ToolbarProps {
   setPositionLock: (fn: (s: boolean) => boolean) => void;
   playing: boolean;
   onPlay: () => void;
-  onBlade: () => void;
   onRipple: () => void;
   onMarker: () => void;
   onFit: () => void;
+  /**
+   * The gear.
+   *
+   * Everything else on this row is one click away from changing the cut.
+   * These two are settings and reference, they were the last things left in
+   * a menu bar that is gone, and they do not deserve a permanent button each.
+   */
+  linked: boolean;
+  onLinkedChange?: (next: boolean) => void;
+  onShowShortcuts?: () => void;
   zoom: number;
   onZoom: (z: number) => void;
   timecode: React.ReactNode;
@@ -1092,7 +1137,7 @@ function Toolbar(p: ToolbarProps) {
   return (
     <div
       style={{
-        height: 34,
+        height: TIMELINE_TOOLBAR_HEIGHT,
         flex: 'none',
         background: 'var(--head)',
         borderBottom: '1px solid var(--edge)',
@@ -1106,50 +1151,122 @@ function Toolbar(p: ToolbarProps) {
         overflowX: 'auto',
       }}
     >
-      <TB on={p.playing} onClick={p.onPlay} label={p.playing ? 'Pause' : 'Play'} hint="Space">
+      <TB
+        on={p.playing}
+        onClick={p.onPlay}
+        label={p.playing ? 'Pause' : 'Play'}
+        hint={p.playing ? 'Pause playback' : 'Play from playhead'}
+        meta="Space"
+      >
         {p.playing
           ? <><rect x="4" y="3" width="3" height="10" /><rect x="9" y="3" width="3" height="10" /></>
           : <path d="M4 3l9 5-9 5z" fill="currentColor" stroke="none" />}
       </TB>
 
       <Sep />
-      <TB on={p.mode === 'select'} onClick={() => p.setMode('select')} label="Selection mode" hint="Drag clips, trim edges. A">
+      <TB
+        on={p.mode === 'select'}
+        onClick={() => p.setMode('select')}
+        label="Selection mode"
+        hint="Select and drag clips, trim edges"
+        meta="A"
+      >
         <path d="M3.5 2l9 5.5-3.9.8 2.3 4-1.6.9-2.3-4-2.6 3z" fill="currentColor" stroke="none" />
       </TB>
-      <TB on={p.mode === 'trim'} onClick={() => p.setMode('trim')} label="Trim edit mode" hint="Edge-based trimming. T">
-        <path d="M4 2v12M12 2v12M6.5 8h3" />
-      </TB>
-      <TB on={p.mode === 'dynamic'} onClick={() => p.setMode('dynamic')} label="Dynamic trim" hint="The playhead turns yellow. W">
-        <path d="M8 1.8v12.4M5.4 5.4L2.6 8l2.8 2.6M10.6 5.4L13.4 8l-2.8 2.6" />
-      </TB>
-      <TB on={p.mode === 'blade'} onClick={() => p.setMode('blade')} label="Blade mode" hint="Click a clip to cut it. B">
-        <path d="M8 1v9" /><circle cx="5" cy="12.5" r="2" /><circle cx="11" cy="12.5" r="2" />
+      {/*
+        Scissors, with blades.
+
+        This drew one straight line above two rings, which is a scissors with
+        the only part of it that cuts left out: at fourteen pixels it read as
+        a lollipop. The blades cross now, and they point up, because the cut
+        this makes is a vertical one across the track. Picked by rendering the
+        candidates at the size the toolbar actually draws them.
+      */}
+      <TB
+        on={p.mode === 'blade'}
+        onClick={() => p.setMode('blade')}
+        label="Blade mode"
+        hint="Click a clip to cut it at cursor"
+        meta="B"
+      >
+        <circle cx="5" cy="12.5" r="1.85" /><circle cx="11" cy="12.5" r="1.85" />
+        <path d="M6.2 11.1L11.3 2.1" /><path d="M9.8 11.1L4.7 2.1" />
       </TB>
 
       <Sep />
-      <TB on={false} onClick={p.onBlade} label="Blade at playhead" hint="Cuts every auto-select track at once">
-        <path d="M2 4h5v8H2zM9 4h5v8H9zM8 1v14" strokeDasharray="2.2 1.7" />
-      </TB>
-      <TB on={false} onClick={p.onRipple} label="Ripple delete" hint="Removes the selection and closes the hole. Delete">
-        <rect x="9.6" y="4" width="5.2" height="8" rx="1" />
-        <path d="M7.6 8H1.4M3.6 5.6L1.2 8l2.4 2.4" />
+      {/*
+        Trim mode, dynamic trim and blade-at-playhead were here.
+
+        They are not gone from the app: T, W and the Clip menu still reach
+        all three, and `mode` still has 'trim' and 'dynamic' in it because
+        the interactions do. What went is their place in this row, which had
+        grown to ten buttons of which three were modes most cuts never enter.
+      */}
+      {/*
+        A bin, and not the arrow-into-a-box this used to draw.
+
+        That one was trying to say "and the hole closes", which is the half of
+        ripple delete a picture cannot carry at fourteen pixels: it drew as a
+        box with a dash beside it and read as neither. The bin is the part
+        everyone already knows, and the label and the tooltip carry the rest.
+      */}
+      <TB
+        on={false}
+        onClick={p.onRipple}
+        label="Ripple delete"
+        hint="Removes the selection and closes the hole"
+        meta="Delete"
+      >
+        <path d="M3.6 4.4h8.8M6.4 4.4V3.2a.9.9 0 01.9-.9h1.4a.9.9 0 01.9.9v1.2" />
+        <path d="M4.9 4.4l.5 8a1 1 0 001 .95h3.2a1 1 0 001-.95l.5-8" />
+        <path d="M7 6.8v4M9 6.8v4" />
       </TB>
 
       <Sep />
-      <TB on={p.snapping} onClick={() => p.setSnapping((s) => !s)} label="Snapping" hint="Edges stick to cuts, markers and the playhead. N">
+      <TB
+        on={p.snapping}
+        onClick={() => p.setSnapping((s) => !s)}
+        label="Snapping"
+        hint="Edges stick to cuts, markers and the playhead"
+        meta="N"
+      >
         <path d="M4.4 2.6v5.4a3.6 3.6 0 007.2 0V2.6M4.4 6h3.2M11.6 6H8.4" />
       </TB>
-      <TB on={p.positionLock} onClick={() => p.setPositionLock((s) => !s)} label="Position lock" hint="Clips can still be trimmed, but not moved">
+      <TB
+        on={p.positionLock}
+        onClick={() => p.setPositionLock((s) => !s)}
+        label="Position lock"
+        hint="Clips can still be trimmed, but not moved"
+      >
         <rect x="3.5" y="7" width="9" height="6" rx="1" /><path d="M5.5 7V5a2.5 2.5 0 015 0v2" />
       </TB>
-      <TB on={false} onClick={p.onMarker} label="Add marker" hint="Markers mark a moment, not a clip. M">
+      <TB
+        on={false}
+        onClick={p.onMarker}
+        label="Add marker"
+        hint="Markers mark a moment, not a clip"
+        meta="M"
+      >
         <path d="M4 2h8v9l-4-2.6L4 11z" fill="currentColor" stroke="none" />
       </TB>
+
+      <Sep />
+      <TimelineGear
+        linked={p.linked}
+        onLinkedChange={p.onLinkedChange}
+        onShowShortcuts={p.onShowShortcuts}
+      />
 
       <span style={{ flex: 1, minWidth: 8 }} />
       {p.timecode}
       <Sep />
-      <TB on={false} onClick={p.onFit} label="Fit timeline" hint="Zoom out until the whole edit fits">
+      <TB
+        on={false}
+        onClick={p.onFit}
+        label="Fit timeline"
+        hint="Zoom out until the whole edit fits"
+        meta="Shift+Z"
+      >
         <path d="M2 5V2h3M14 5V2h-3M2 11v3h3M14 11v3h-3" />
       </TB>
       <input
@@ -1160,6 +1277,7 @@ function Toolbar(p: ToolbarProps) {
         value={p.zoom}
         onChange={(e) => p.onZoom(parseFloat(e.target.value))}
         aria-label="Timeline zoom"
+        data-tip={tip('Timeline zoom', 'Zoom in or out across the edit')}
         style={{ width: 78, accentColor: 'var(--ctl-on)', cursor: 'pointer' }}
       />
     </div>
@@ -1170,13 +1288,125 @@ const Sep = () => (
   <span aria-hidden style={{ width: 1, height: 18, background: 'var(--edge-soft)', margin: '0 6px', flex: 'none' }} />
 );
 
+/**
+ * The timeline's settings, in the one place left that could hold them.
+ *
+ * Linked Selection lived in the Timeline menu and nowhere else: no key, no
+ * button, and when the menus went it would have gone with them. It is the
+ * reason this exists. The shortcut sheet is here for the same shape of
+ * reason, having lost the Help menu.
+ *
+ * Deliberately not a home for Snapping or Add Track. Both already have a
+ * control on screen, and a setting that can be changed in two places is a
+ * setting that will disagree with itself in one of them.
+ */
+function TimelineGear({
+  linked, onLinkedChange, onShowShortcuts,
+}: {
+  linked: boolean;
+  onLinkedChange?: (next: boolean) => void;
+  onShowShortcuts?: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  /**
+   * Where to draw the menu, measured when it opens.
+   *
+   * `position: fixed` and not `absolute`, because this row is
+   * `overflow-x: auto` so a narrow window can scroll it, and a scroll
+   * container clips its absolutely positioned children on BOTH axes. The
+   * first version of this opened a menu that was in the DOM, was focusable,
+   * answered to the keyboard, and could not be seen: the toolbar cut it off
+   * a pixel below the button.
+   */
+  const [at, setAt] = useState<{ left: number; top: number } | null>(null);
+  const wrap = useRef<HTMLDivElement | null>(null);
+
+  // a click anywhere else closes it, and so does Escape
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: PointerEvent) => {
+      if (!wrap.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    window.addEventListener('pointerdown', onDown);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('pointerdown', onDown);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  return (
+    <div ref={wrap} style={{ position: 'relative', flex: 'none', display: 'flex' }}>
+      <TB
+        on={open}
+        onClick={() => {
+          const box = wrap.current?.getBoundingClientRect();
+          if (box) setAt({ left: box.left, top: box.bottom + 4 });
+          setOpen((o) => !o);
+        }}
+        label="Timeline settings"
+        hint="Linked selection and the shortcut sheet"
+      >
+        {/*
+          A real gear: six teeth and a hub.
+
+          A hub with eight spokes radiating off it is what this drew before,
+          which at fourteen pixels is a sun. Six teeth rather than eight
+          because the gap between teeth is what says "gear", and at this size
+          eight of them close up into a blob. Measured by rendering it.
+        */}
+        <path d="M12.11 6.74 L14.2 6.91 L14.2 9.09 L12.11 9.26 L11.14 10.93 L12.05 12.83 L10.15 13.92 L8.97 12.19 L7.03 12.19 L5.85 13.92 L3.95 12.83 L4.86 10.93 L3.89 9.26 L1.8 9.09 L1.8 6.91 L3.89 6.74 L4.86 5.07 L3.95 3.17 L5.85 2.08 L7.03 3.81 L8.97 3.81 L10.15 2.08 L12.05 3.17 L11.14 5.07 Z" />
+        <circle cx="8" cy="8" r="2.1" />
+      </TB>
+
+      {open && at ? (
+        <div role="menu" aria-label="Timeline settings" style={{ ...POPOVER, left: at.left, top: at.top }}>
+          <button
+            type="button"
+            role="menuitemcheckbox"
+            aria-checked={linked}
+            style={ITEM}
+            onClick={() => { onLinkedChange?.(!linked); setOpen(false); }}
+          >
+            <span style={{ width: 13, flex: 'none', color: 'var(--orange)' }}>{linked ? '\u2713' : ''}</span>
+            Linked selection
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            style={ITEM}
+            onClick={() => { onShowShortcuts?.(); setOpen(false); }}
+          >
+            <span style={{ width: 13, flex: 'none' }} />
+            Keyboard shortcuts
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+const POPOVER: React.CSSProperties = {
+  position: 'fixed', zIndex: 40,
+  minWidth: 186, padding: 4, borderRadius: 6,
+  background: 'var(--panel)', border: '1px solid var(--edge)', boxShadow: 'var(--lift)',
+};
+
+const ITEM: React.CSSProperties = {
+  display: 'flex', alignItems: 'center', gap: 7, width: '100%',
+  padding: '6px 9px', borderRadius: 4, border: 0, background: 'none',
+  color: 'var(--t2)', font: 'inherit', fontSize: 12.5, cursor: 'pointer', textAlign: 'left',
+};
+
 function TB({
-  on, onClick, label, hint, children,
+  on, onClick, label, hint, meta, children,
 }: {
   on: boolean;
   onClick: () => void;
   label: string;
   hint: string;
+  meta?: string;
   children: React.ReactNode;
 }) {
   return (
@@ -1185,7 +1415,7 @@ function TB({
       onClick={onClick}
       aria-pressed={on}
       aria-label={label}
-      title={`${label}, ${hint}`}
+      data-tip={tip(label, hint, meta)}
       style={{
         width: 26,
         height: 22,

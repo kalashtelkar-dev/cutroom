@@ -15,9 +15,21 @@ import type { Graph } from '../editor-api/graph.ts';
 import type { Timeline } from '../timeline/types.ts';
 import type { Frames } from '../time/frames.ts';
 
+/**
+ * What to do when the footage is not the shape of the frame it is going into.
+ *
+ * `contain` keeps the whole picture and puts bars where it does not reach.
+ * `cover` fills the frame and loses whatever falls outside it. They are the
+ * same answer whenever the two shapes agree, which is why nothing needed this
+ * until a 16:9 cut was asked for as a 9:16 reel.
+ */
+export type FrameFit = 'contain' | 'cover';
+
 export interface DeliverySpec {
   width: number;
   height: number;
+  /** Default `contain`: a delivery must not crop someone's picture by surprise. */
+  fit?: FrameFit;
   /** Container the final file is written to. */
   container: 'mp4' | 'mov' | 'webm';
   videoCodec?: string;
@@ -37,6 +49,20 @@ export interface CompileOptions {
    * timeline itself references.
    */
   subtitleKey?: string;
+
+  /**
+   * A font already in storage, to burn the captions with.
+   *
+   * The render container has one font and it draws boxes for every Indic
+   * script, Thai, Han, kana and Hangul, so a Hindi caption that is right in
+   * the viewer renders as a row of squares. Given this, the compiler muxes
+   * the font into the subtitle file as an attachment and names it in the
+   * burn's style. See `lib/subtitles/fonts.ts` for why it takes both.
+   *
+   * `family` is matched by libass against the font's own name table, so it
+   * is the font's string and not a label of ours.
+   */
+  subtitleFont?: { key: string; family: string; file: string };
 
   delivery: DeliverySpec;
   /** Keys already built, by cache key. A hit means the node is not emitted. */

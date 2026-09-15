@@ -84,24 +84,37 @@ export function TrackHeaders({
         </span>
         {onAddTrack ? (
           <div style={{ position: 'relative' }}>
+            {/*
+              Red, like Export.
+
+              It is the one control in this column that adds something rather
+              than changing what is already there, and it sat as a hairline
+              outline in the quietest corner of the chrome. Red is this
+              application's action colour, and an action is what this is.
+            */}
             <button
               type="button"
               onClick={() => setAddMenuOpen((o) => !o)}
               title="Add track: Video, Audio, or Subtitle"
               aria-label="Add track"
+              aria-expanded={addMenuOpen}
               style={{
-                background: 'none',
-                border: '1px solid var(--edge-soft)',
+                background: 'var(--red)',
+                border: '1px solid var(--red)',
                 borderRadius: 3,
-                color: 'var(--t2)',
+                color: 'var(--on-accent)',
                 fontSize: 9.5,
+                fontWeight: 600,
                 fontFamily: 'var(--mono)',
-                padding: '0 4px',
+                padding: '0 5px',
                 height: 17,
                 cursor: 'pointer',
                 display: 'flex',
                 alignItems: 'center',
                 gap: 2,
+                // open is a state the button has to show: the menu it opens
+                // is over the lanes, not over this
+                filter: addMenuOpen ? 'brightness(1.15)' : undefined,
               }}
             >
               <span style={{ fontSize: 11, lineHeight: 1 }}>+</span>

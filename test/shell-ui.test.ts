@@ -17,19 +17,25 @@ import { RATES, frames, timeRange, toTimecode, type Frames } from '../lib/time/f
 import { findClip, timelineDuration } from '../lib/timeline/document.ts';
 import { applyEdits } from '../lib/timeline/edits.ts';
 import { demoProject } from '../lib/fixtures/project.ts';
-import type { EditOp, MediaRef, PlacedItem } from '../lib/timeline/types.ts';
+import type { EditOp, MediaRef, PlacedItem, Track, TrackKind } from '../lib/timeline/types.ts';
 
 import {
   buildTools, runsLocally, searchTools, toolContext, toolRung, toolWhy, trackFacts,
   type Tool,
 } from '../components/rail/tools.ts';
 import { putCard, resetCards } from '../lib/intel/index.ts';
+import { buildCommands, type Actions } from '../lib/commands/registry.ts';
+import { matchShortcut } from '../lib/commands/shortcuts.ts';
 import {
   atEnd, clampToWindow, hasRoom, scrubFrame, sourceWindow, timelineWindow, trimMarks,
   windowFraction,
 } from '../components/viewer/transport.ts';
 import { fieldText, nextField, type FieldState } from '../components/inspector/numberField.ts';
 import { isTyping, shellShortcut } from '../components/shell/shortcuts.ts';
+import {
+  fitTimelineHeight, RULER_HEIGHT, TIMELINE_MIN_HEIGHT, TIMELINE_TAIL,
+  TIMELINE_TOOLBAR_HEIGHT, TRACK_HEIGHT, VIEWER_MIN_HEIGHT,
+} from '../components/timeline/interactions.ts';
 import { FALLBACKS } from '../components/ui/tokens.ts';
 
 /**
@@ -274,29 +280,84 @@ describe('shell shortcuts', () => {
     assert.equal(isTyping(undefined), false);
   });
 
+  /**
+   * A shortcut printed on a tooltip and bound nowhere is a promise the app
+   * breaks every time someone believes it.
+   *
+   * Two things can keep that promise and the test has to ask both. The shell
+   * binds the palette chord itself; everything on a menu is bound by the
+   * command registry. Export is the reason this matters: it prints Cmd+E from
+   * the toolbar and is bound by the registry, having left the File menu for
+   * the button, so a test that only knew about `shellShortcut` would have
+   * called a live binding dead.
+   */
   test('every shortcut the toolbar advertises resolves to an action', () => {
     /** What each advertised string means as a keystroke. */
     const ADVERTISED: Record<string, Parameters<typeof shellShortcut>[0]> = {
       'Cmd / Ctrl + K': { key: 'k', metaKey: true },
       'Cmd / Ctrl + Z': { key: 'z', metaKey: true },
       'Shift + Cmd / Ctrl + Z': { key: 'z', metaKey: true, shiftKey: true },
+      'Cmd / Ctrl + E': { key: 'e', metaKey: true },
+      'Cmd / Ctrl + I': { key: 'i', metaKey: true },
+      'Shift + Cmd / Ctrl + J': { key: 'j', metaKey: true, shiftKey: true },
       'Alt / Opt + D': { key: '∂', code: 'KeyD', altKey: true },
     };
+    const commands = buildCommands(NO_ACTIONS);
     const source = read('components/shell/Toolbar.tsx');
     const printed = [...source.matchAll(/meta="([^"]+)"/g)].map((m) => m[1]);
-    assert.ok(printed.length >= 4, 'the toolbar should still be advertising its shortcuts');
+    assert.ok(printed.length >= 3, 'the toolbar should still be advertising its shortcuts');
     for (const label of printed) {
       const chord = ADVERTISED[label];
       assert.ok(chord, `the toolbar advertises "${label}" and nothing here says what it means`);
-      assert.ok(
-        shellShortcut(chord) !== null,
-        `"${label}" is printed on a button and bound to nothing`,
+      const bound = shellShortcut(chord) !== null
+        || commands.some((c) => matchShortcut(chord, c.shortcut));
+      assert.ok(bound, `"${label}" is printed on a button and bound to nothing`);
+    }
+  });
+
+  test('the toolbar builds no button for Assistant or Media Pool, because the tabs do', () => {
+    // the props, not the prose: the file explains in a comment why these two
+    // are absent, and a search of the whole source finds that explanation
+    const src = read('components/shell/Toolbar.tsx');
+    for (const label of ['Assistant', 'Media Pool', 'Tools']) {
+      assert.equal(
+        src.includes(`label="${label}"`),
+        false,
+        `the toolbar builds a ${label} button again, and the browser column already has one`,
       );
     }
+  });
+
+  test('Export is a button, and the command behind it survives to hold the key', () => {
+    assert.ok(read('components/shell/Toolbar.tsx').includes('className="cr-export"'));
+    const exportCmd = buildCommands(NO_ACTIONS).find((c) => c.id === 'file.export');
+    assert.ok(exportCmd, 'without the command there is no Cmd+E');
+    assert.ok(exportCmd.shortcut, 'and without a shortcut the command is only the button');
   });
 });
 
 // ── the tool rail ───────────────────────────────────────────────────────
+
+/**
+ * An Actions bag that does nothing.
+ *
+ * This file never runs a command, it only asks the registry which chords are
+ * claimed. A stub whose methods throw would be the safer default, but every
+ * one of these is a function the registry stores and does not call, so
+ * no-ops say that more plainly than a throw nobody will ever see.
+ */
+const NO_ACTIONS: Actions = {
+  edit: () => {}, undo: () => {}, redo: () => {}, seek: () => {},
+  job: async () => undefined,
+  newProject: () => {}, open: () => {},
+  save: async () => {}, saveAs: async () => {},
+  importMedia: () => {}, exportVideo: () => {},
+  toggleSnapping: () => {}, toggleLinked: () => {},
+  bladeAtPlayhead: () => {}, rippleDelete: () => {},
+  addTrack: () => {}, zoomFit: () => {}, zoomIn: () => {}, zoomOut: () => {},
+  openWorkbench: () => {}, openJobs: () => {}, selectAll: () => {}, showShortcuts: () => {},
+  notify: () => {},
+};
 
 const byCard = (tools: Tool[], cardId: string): Tool => {
   const hit = tools.find((t) => t.cardId === cardId);
@@ -331,24 +392,35 @@ describe('tool rail preconditions', () => {
     assert.equal(toolContext(doc, after, null).splittableAtPlayhead, false);
   });
 
-  test('the blade tool says why it cannot run, on the frame it cannot run on', () => {
+  test('the burn tool says why it cannot run, on a timeline it cannot run on', () => {
     const doc = demoProject();
-    const blade = byCard(buildTools(), 'timeline-blade');
-    const first = (findClip(doc, 'clp_lake_next_to_mountains') as PlacedItem).range.start;
-    assert.equal(
-      toolWhy(blade, toolContext(doc, first, null)),
-      'no clip under the playhead to cut',
-    );
-    assert.equal(toolWhy(blade, toolContext(doc, F(first + 1), null)), null);
+    const burn = byCard(buildTools(), 'subtitle-burn');
+    assert.equal(toolWhy(burn, toolContext(doc, F(0), null)), null, 'the demo has dialogue to transcribe');
+
+    // strip the sound and the tool has nothing to hear
+    const ops: EditOp[] = [];
+    for (const track of doc.tracks) {
+      if (track.kind !== 'audio') continue;
+      for (const item of track.items) if (item.kind === 'clip') ops.push({ op: 'remove_clip', clipId: item.id });
+    }
+    assert.ok(ops.length, 'the demo project should still have audio to remove');
+    const silent = applyEdits(doc, ops).timeline;
+    assert.equal(toolWhy(burn, toolContext(silent, F(0), null)), 'no audio track to transcribe');
   });
 
-  test('ripple delete wants a selection and says so', () => {
+  /**
+   * The archived cards left their PRESENTATION entries behind with them, and
+   * the fixtures still carry their ids. So a fixture card with no entry is
+   * exactly the case `improvise()` is for, and what it must NOT do is invent
+   * a precondition: a tool that refuses to run for a reason nobody wrote is
+   * worse than one that always offers to.
+   */
+  test('a card with no presentation entry gets a tool, and no invented precondition', () => {
     const doc = demoProject();
-    const ripple = byCard(buildTools(), 'timeline-ripple');
-    assert.equal(toolWhy(ripple, toolContext(doc, F(0), null)), 'select a clip first');
-
-    const selected = findClip(doc, 'clp_lake_next_to_mountains') as PlacedItem;
-    assert.equal(toolWhy(ripple, toolContext(doc, F(0), selected)), null);
+    const improvised = byCard(buildTools(), 'timeline-blade');
+    assert.equal(improvised.requires, undefined, 'improvise() must not make up a rule');
+    assert.equal(toolWhy(improvised, toolContext(doc, F(0), null)), null);
+    assert.equal(improvised.name, 'Timeline blade', 'the name is made from the id');
   });
 
   test('the counts come off the document, and follow it when it is edited', () => {
@@ -364,15 +436,12 @@ describe('tool rail preconditions', () => {
     const { timeline: after } = applyEdits(doc, ops);
     assert.equal(trackFacts(after).videoClipCount, before.videoClipCount - 1);
 
-    const colour = byCard(buildTools(), 'colour-match');
-    assert.equal(toolWhy(colour, toolContext(after, F(0), null)), null);
   });
 
-  test('a timeline with one video clip cannot match colour between shots', () => {
+  test('a timeline stripped to one video clip counts as one', () => {
     let doc = demoProject();
-    const video = doc.tracks.filter((t) => t.kind === 'video');
     const ops: EditOp[] = [];
-    for (const track of video) {
+    for (const track of doc.tracks.filter((t) => t.kind === 'video')) {
       for (const item of track.items) {
         if (item.kind === 'clip' && item.id !== 'clp_redrock_talent_3') {
           ops.push({ op: 'remove_clip', clipId: item.id });
@@ -380,14 +449,7 @@ describe('tool rail preconditions', () => {
       }
     }
     doc = applyEdits(doc, ops).timeline;
-
-    const facts = trackFacts(doc);
-    assert.equal(facts.videoClipCount, 1, 'the batch really did remove them from the document');
-    const colour = byCard(buildTools(), 'colour-match');
-    assert.equal(
-      toolWhy(colour, toolContext(doc, F(0), null)),
-      'needs two or more video clips to match between',
-    );
+    assert.equal(trackFacts(doc).videoClipCount, 1, 'the batch really did remove them from the document');
   });
 });
 
@@ -576,6 +638,70 @@ describe('structure the panels have to keep', () => {
       /resolution = ['"`]/.test(src),
       false,
       'a hard-coded default is a number every project displays and no caller can correct',
+    );
+  });
+
+  test('the shell sizes the timeline from the tracks, not from the window', () => {
+    const src = read('components/shell/Shell.tsx');
+    assert.ok(
+      /fitTimelineHeight\(timeline\.tracks, vh\)/.test(src),
+      'the panel is the sum of the lanes in it, which is the only reason adding a track grows it',
+    );
+    assert.equal(
+      /Math\.round\(vh \* 0\.4/.test(src),
+      false,
+      'a fraction of the window is the empty ground this replaced',
+    );
+    assert.ok(
+      /onReset=\{\(\) => \{ setTimelineDrag\(null\)/.test(src),
+      'reset goes back to following the tracks, not to a pinned number',
+    );
+  });
+});
+
+// ── how tall the timeline panel is ──────────────────────────────────────
+// It opened at 42% of the window whatever was in it, so a four track cut sat
+// above a hand's width of empty ground and the viewer had lost that space to
+// hold it.
+
+describe('the timeline is as tall as its tracks', () => {
+  const tracksOf = (kinds: TrackKind[]): Track[] => kinds.map((kind, i) => ({
+    id: `trk_${i}` as Track['id'], kind, name: `${kind} ${i}`, items: [],
+    locked: false, muted: false, solo: false, enabled: true, autoSelect: true,
+  }));
+
+  /** Toolbar, its hairline, the ruler, and the ground under the last lane. */
+  const CHROME = TIMELINE_TOOLBAR_HEIGHT + 1 + RULER_HEIGHT + TIMELINE_TAIL;
+  const TALL = 2000; // so nothing below is measuring the ceiling by accident
+
+  test('it is the chrome plus the lanes that exist', () => {
+    const kinds: TrackKind[] = ['video', 'subtitle', 'video', 'audio'];
+    const lanes = kinds.reduce((h, k) => h + TRACK_HEIGHT[k], 0);
+    assert.equal(fitTimelineHeight(tracksOf(kinds), TALL), CHROME + lanes);
+  });
+
+  test('a video track adds 68 and an audio track adds 46', () => {
+    const base = fitTimelineHeight(tracksOf(['video']), TALL);
+    assert.equal(fitTimelineHeight(tracksOf(['video', 'video']), TALL) - base, TRACK_HEIGHT.video);
+    assert.equal(fitTimelineHeight(tracksOf(['video', 'audio']), TALL) - base, TRACK_HEIGHT.audio);
+    assert.equal(
+      fitTimelineHeight(tracksOf(['video', 'subtitle']), TALL) - base, TRACK_HEIGHT.subtitle,
+      'a subtitle lane is shorter than either, and the panel has to say so',
+    );
+  });
+
+  test('it never grows past what the viewer needs', () => {
+    const many = tracksOf(Array<TrackKind>(24).fill('video'));
+    const vh = 900;
+    assert.ok(fitTimelineHeight(many, TALL) > vh, 'the fixture is big enough to be capped');
+    assert.equal(fitTimelineHeight(many, vh), vh - VIEWER_MIN_HEIGHT);
+  });
+
+  test('and never shrinks below being a timeline', () => {
+    assert.equal(fitTimelineHeight([], TALL), TIMELINE_MIN_HEIGHT);
+    assert.equal(
+      fitTimelineHeight(tracksOf(['video', 'video', 'video']), 200), TIMELINE_MIN_HEIGHT,
+      'a window too short for both still leaves the timeline usable',
     );
   });
 });

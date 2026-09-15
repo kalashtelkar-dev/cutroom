@@ -4,9 +4,19 @@
  * The tool rail.
  *
  * Pipelines are tools, and tools live where you can always see them, never
- * behind a tab. Icon-only by intent: the sentence lives in the tooltip and is
- * read out of the same intel card the router reads, so a tool cannot describe
- * itself one way to a person and another way to the model.
+ * behind a tab.
+ *
+ * Each one carries its NAME under its glyph. It was icon-only, on the
+ * argument that the sentence belongs in the tooltip, and the argument was
+ * half right: the sentence does. A name is not a sentence, and a glyph you
+ * have to hover to identify is a glyph you have to hover every time, because
+ * a drawing of "tighten the cut" and a drawing of "weave in b-roll" are two
+ * rectangles and a line either way. The tooltip still carries the sentence,
+ * still read out of the same intel card the router reads, so a tool cannot
+ * describe itself one way to a person and another to the model.
+ *
+ * The name comes from the card too, through `PRESENTATION`, so it is the same
+ * string the palette and the run card show.
  *
  * The corner dot is the cost tier, so you can see *before* you click whether
  * this is 20ms of local patching or GPU minutes.
@@ -116,8 +126,19 @@ export function ToolRail({
                 aria-disabled={why ? true : undefined}
                 onClick={() => onPick(tool, why)}
               >
-                <ToolIcon shapes={tool.icon} />
-                {tier > 0 ? <i className="cr-dot" data-tier={tier} aria-hidden="true" /> : null}
+                <span className="cr-rglyph">
+                  <ToolIcon shapes={tool.icon} />
+                  {/* anchored to the glyph, not the button: the button is now
+                      as wide as its longest name and the dot belongs to the
+                      icon, which is the only part that stays put */}
+                  {tier > 0 ? <i className="cr-dot" data-tier={tier} aria-hidden="true" /> : null}
+                </span>
+                {/*
+                  aria-hidden: the button's aria-label already names the tool
+                  and its cost, and a screen reader reading the name twice is
+                  worse than not drawing it at all.
+                */}
+                <span className="cr-rname" aria-hidden="true">{tool.name}</span>
               </button>
             </div>
           );
@@ -146,7 +167,7 @@ export function ToolRail({
 
 const CSS = `
 .cr-rail{
-  width:50px;flex:none;background:var(--panel-2);
+  width:78px;flex:none;background:var(--panel-2);
   border-right:1px solid var(--edge);box-shadow:var(--lift);
   display:flex;flex-direction:column;align-items:center;
   padding:7px 0;gap:2px;overflow-y:auto;overflow-x:hidden;min-height:0;
@@ -160,9 +181,18 @@ const CSS = `
 }
 .cr-rail .cr-rgrp-wrap:first-child .cr-rgrp{margin-top:0}
 .cr-rtool{
-  width:36px;height:31px;border-radius:3px;flex:none;position:relative;
-  display:flex;align-items:center;justify-content:center;color:var(--t2);
-  background:none;border:0;padding:0;cursor:pointer;font:inherit;
+  width:70px;border-radius:4px;flex:none;position:relative;
+  display:flex;flex-direction:column;align-items:center;justify-content:flex-start;
+  gap:3px;color:var(--t2);
+  background:none;border:0;padding:6px 3px 5px;cursor:pointer;font:inherit;
+}
+/* the name wraps to a second line rather than being cut, and stops there:
+   a third line would push the rail's own scroll before four tools fit */
+.cr-rname{
+  font-size:9px;line-height:1.18;font-weight:500;letter-spacing:.005em;
+  text-align:center;color:inherit;
+  display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;
+  overflow:hidden;overflow-wrap:anywhere;
 }
 .cr-rtool:hover{background:var(--edge);color:var(--t1)}
 .cr-rtool[data-armed]{
@@ -174,11 +204,12 @@ const CSS = `
 .cr-rtool[data-off]{opacity:.3}
 .cr-rtool[data-off]:hover{background:none;color:var(--t2)}
 .cr-rtool[data-off] .cr-dot{opacity:.5}
-.cr-dot{position:absolute;top:4px;right:5px;width:4px;height:4px;border-radius:50%}
+.cr-rglyph{position:relative;display:flex;align-items:center;justify-content:center;flex:none}
+.cr-dot{position:absolute;top:-2px;right:-5px;width:4px;height:4px;border-radius:50%}
 .cr-dot[data-tier="1"]{background:var(--yellow)}
 .cr-dot[data-tier="2"]{background:var(--orange)}
 .cr-rmore{
-  width:36px;height:26px;border-radius:3px;flex:none;color:var(--t3);
+  width:70px;height:26px;border-radius:4px;flex:none;color:var(--t3);
   display:flex;align-items:center;justify-content:center;margin-top:4px;
   border:1px dashed var(--edge-soft);background:none;cursor:pointer;padding:0;
 }
