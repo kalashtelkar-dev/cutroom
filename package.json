@@ -26,6 +26,7 @@
     "prove:layers": "node --experimental-strip-types scripts/prove-layers.ts",
     "cards": "node --experimental-strip-types scripts/check-cards.ts",
     "prove:captions": "node --experimental-strip-types scripts/prove-captions.ts",
+    "prove:caption-edit": "node --experimental-strip-types scripts/prove-caption-edit.ts",
     "prove:caption-playback": "node --experimental-strip-types scripts/prove-caption-playback.ts"
   },
   "dependencies": {

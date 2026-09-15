@@ -14,8 +14,9 @@ import {
   browserSession, readSession, writeSession, type SessionStore,
 } from '@/lib/project/session.ts';
 import { mediaUsage, removeMediaOps, removeMediaLabel } from '@/lib/timeline/removeMedia.ts';
-import { placeSrtOps, subtitleTrack } from '@/lib/subtitles/place.ts';
+import { placeCuesOps, placeSrtOps } from '@/lib/subtitles/place.ts';
 import { subtitleKeyOf } from '@/lib/subtitles/output.ts';
+import { cuesInOutput } from '@/lib/subtitles/cues.ts';
 import { RATES } from '@/lib/time/frames.ts';
 import { applyEdits } from '@/lib/timeline/edits.ts';
 import { addTrackOp } from '@/lib/timeline/addTrack.ts';
@@ -513,6 +514,21 @@ export default function EditorPage() {
       const first = [...selection][0];
       const placed = first ? findClip(doc, first) : null;
       if (!placed) { note('Select a clip to ripple delete'); return; }
+      /**
+       * A cue is deleted where it stands, not rippled.
+       *
+       * Rippling a subtitle track pulls every later cue earlier by the length
+       * of the one removed, which puts all of them on the wrong words. The
+       * hole is the right answer: nobody is speaking there. Without this the
+       * batch would be empty and the toast would still say "Ripple deleted",
+       * which a caption becoming selectable is what made reachable.
+       */
+      if (placed.item.kind === 'caption') {
+        commit([{ op: 'remove_caption', captionId: placed.item.id }], 'Delete caption');
+        setSelection(new Set());
+        note('Caption deleted');
+        return;
+      }
       commit(rippleDeleteOps(doc, placed), 'Ripple delete');
       setSelection(new Set());
       note('Ripple deleted');
@@ -945,26 +961,52 @@ export default function EditorPage() {
        * The times are in the SOURCE file's seconds, so they are offset by
        * where that clip actually sits on the timeline, exactly as the B-roll
        * markers are.
+       *
+       * The reply's cues come before the file the same run wrote. whisperx
+       * fills lines rather than honouring the segments it aligned, so that
+       * file is two eight-second blocks where the aligned result is six
+       * sentences (`lib/subtitles/cues.ts` carries the measurement), and the
+       * reply is already in hand, so the better answer is also the cheaper
+       * one. The file stays as the fallback, for an imported SRT and for a
+       * pipeline that returns nothing else.
        */
-      const srtKey = subtitleKeyOf(output);
-      if (srtKey) {
+      const cues = cuesInOutput(output, doc.rate);
+      const srtKey = cues.length ? null : subtitleKeyOf(output);
+
+      // A run that transcribed silence is a real answer, and "completed" over
+      // an empty subtitle track is the exact failure this fold exists to stop.
+      if (!cues.length && !srtKey
+        && ('degenerate' in output || 'transcript' in output || 'language' in output)) {
+        return `${title}: no speech was found, so there is nothing to caption`;
+      }
+
+      if (cues.length || srtKey) {
         const clip = clipForMedia(mediaKey);
         if (!clip) return `${title}: the clip it read is no longer on the timeline`;
-        if (!subtitleTrack(doc)) return `${title}: this project has no subtitle track to put captions on`;
         try {
-          const res = await fetch(`/api/outputs/read?key=${encodeURIComponent(srtKey)}`);
-          const body = await res.json().catch(() => null);
-          if (!res.ok || typeof body?.text !== 'string') {
-            return `${title}: the subtitles were made and could not be read back (${body?.error ?? res.status})`;
-          }
           const offset = frames(clip.range.start - (isClip(clip.item) ? clip.item.sourceRange.start : 0));
-          const { ops, cues } = placeSrtOps(doc, body.text, doc.rate, {
-            offset,
-            seed: runId.slice(-8),
-          });
-          if (!cues.length) return `${title}: no speech was found, so there is nothing to caption`;
-          commit(ops, `${title}: ${cues.length} caption${cues.length === 1 ? '' : 's'}`);
-          return `${title}: ${cues.length} caption${cues.length === 1 ? '' : 's'} on the timeline`;
+          // one batch, which is one undo: the track it needs is made inside it
+          const place = { offset, seed: runId.slice(-8), createTrack: true };
+
+          let ops: EditOp[];
+          let count: number;
+          if (srtKey) {
+            const res = await fetch(`/api/outputs/read?key=${encodeURIComponent(srtKey)}`);
+            const body = await res.json().catch(() => null);
+            if (!res.ok || typeof body?.text !== 'string') {
+              return `${title}: the subtitles were made and could not be read back (${body?.error ?? res.status})`;
+            }
+            const fromFile = placeSrtOps(doc, body.text, doc.rate, place);
+            ops = fromFile.ops;
+            count = fromFile.cues.length;
+          } else {
+            ops = placeCuesOps(doc, cues, place);
+            count = cues.length;
+          }
+
+          if (!count) return `${title}: no speech was found, so there is nothing to caption`;
+          commit(ops, `${title}: ${count} caption${count === 1 ? '' : 's'}`);
+          return `${title}: ${count} caption${count === 1 ? '' : 's'} on the timeline`;
         } catch (e) {
           return `${title}: the subtitles were made and could not be placed: ${(e as Error).message}`;
         }

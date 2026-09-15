@@ -578,6 +578,32 @@ function applyOne(draft: Draft, op: EditOp): EditOp[] {
       return [{ op: 'patch_caption', captionId: found.caption.id, set: prev }];
     }
 
+    case 'move_caption': {
+      const found = requireCaption(draft, op.captionId);
+      requireUnlocked(found.track);
+      const dest = requireUnlocked(requireTrack(draft, op.trackId));
+      requirePosition(op.to, 'move_caption.to');
+      const duration = op.duration ?? found.caption.duration;
+      requireDuration(duration, "a caption's duration");
+      if (duration === ZERO) {
+        throw new EditError('bad_duration', `caption "${op.captionId}" cannot be trimmed to nothing`);
+      }
+      const snaps = dest === found.track
+        ? [snapshot(draft, found.track.id)]
+        : [snapshot(draft, found.track.id), snapshot(draft, dest.id)];
+      const caption = found.caption;
+      // lift first, leaving the hole behind, so every cue after it stays on
+      // the words it was written for and `to` still means the frame the
+      // caller was looking at
+      spliceRange(draft, found.track, found.range.start, found.range.duration,
+        [makeGap(draft.used, found.range.duration)]);
+      caption.duration = duration;
+      spliceRange(draft, dest, op.to, duration, [caption]);
+      normaliseTrack(found.track);
+      if (dest !== found.track) normaliseTrack(dest);
+      return restoreOps(snaps);
+    }
+
     case 'remove_marker': {
       const index = draft.timeline.markers.findIndex((m) => m.id === op.markerId);
       if (index < 0) throw new EditError('no_such_marker', `no marker "${op.markerId}"`);

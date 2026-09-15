@@ -207,14 +207,20 @@ const PRESENTATION: Record<string, Presentation> = {
       param('target', 'Target', ['30 seconds', '45 seconds', '60 seconds', 'As tight as it goes']),
     ],
   },
+  /**
+   * No params, because neither of the two it had reached anything.
+   *
+   * `runTool` reads `args.target` and nothing else, so Style and Language
+   * were two dropdowns that changed the run in no way at all. Language
+   * cannot be offered here even once something does read the params: it is
+   * a param on the whisperx nodes inside the pipeline, fixed in the graph,
+   * and a pipeline's run body only carries its input nodes. Boxed and
+   * karaoke need a caption style the document cannot hold yet.
+   */
   'subtitle-burn': {
     group: 'BUILD', order: 3, name: 'Burn subtitles', icon: 'subtitles',
     needs: 'speech on a dialogue track',
     requires: (c) => (c.hasAudio ? null : 'no audio track to transcribe'),
-    params: [
-      param('style', 'Style', ['Plain white', 'Boxed', 'Karaoke word-by-word']),
-      param('language', 'Language', ['Source language', 'English', 'Hindi', 'Spanish']),
-    ],
   },
 
   'colour-match': {

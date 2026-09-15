@@ -108,6 +108,24 @@ that draws the thing, not a second walk of the tracks. `npm run
 prove:caption-playback` presses Play in a real browser and reads the words back
 out of the DOM against the clock's own timecode.
 
+**A cue's length cannot be set with `patch_caption`.** A position on a track
+is the sum of the durations before it, so changing one cue's `duration` moves
+every cue after it: shorten a line by 12 frames and the rest of the subtitles
+slide 12 frames early, off the speech they were written for. This is the
+marker bug wearing a different hat. `move_caption` is the op for both a drag
+and a trim: it lifts the cue, leaves the hole, and drops it at its new place
+and length, so nothing else on the track moves. `test/subtitles.test.ts`
+holds the trap itself as a test, so nobody simplifies the op away.
+
+**A cue is dragged with the pointer, and the pointer is the part that
+breaks.** The lane was calling `onGrab` for a caption before any of this
+existed, and `onGrab` returned early on anything that was not a clip, so cues
+were immovable on screen while every unit test of the geometry passed. Then
+in-place text editing went the same way: the drag grabs on `pointerdown` and
+calls `preventDefault`, which stops the browser ever synthesising the
+`dblclick`, so `onDoubleClick` never fired. Both were found by
+`npm run prove:caption-edit` and neither was visible to `npm test`.
+
 **A subtitle is an item in the document, not a file in the pool.**
 `lib/subtitles/srt.ts` is the only place SRT and the timeline meet, exactly as
 `otio.ts` is the only place `RationalTime` appears. SRT's end time is
@@ -198,6 +216,7 @@ rename turns the test into a no-op that reports success forever.
     npm run cards            # every card's pipeline exists and takes what the plan binds
     npm run prove:captions   # a caption reaches the rendered pixels
     npm run prove:caption-playback  # press Play: the cues are on screen, in order
+    npm run prove:caption-edit      # drag a cue, pull its edge, retype its words
 
 Edit an intel card in `lib/intel/cards/*.md`, run `npm run intel`, then
 `npm test`, the eval suite runs the real router over 15 things a person would

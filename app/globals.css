@@ -425,7 +425,7 @@ body {
 /* ── a caption on the timeline ────────────────────────────── */
 .cr-cap {
   display: flex; align-items: center; overflow: hidden;
-  padding: 0 5px; border-radius: 3px; cursor: pointer; text-align: left;
+  padding: 0 5px; border-radius: 3px; cursor: grab; text-align: left;
   font-family: var(--ui);
   background: linear-gradient(180deg, var(--clip-s), var(--clip-s-bar));
   border: 1px solid var(--edge-soft);
@@ -438,3 +438,11 @@ body {
 .cr-cap[data-selected] { border-color: var(--orange); box-shadow: 0 0 0 1px var(--orange); }
 .cr-cap[data-off] { opacity: 0.45; }
 .cr-cap[data-off] span { text-decoration: line-through; }
+.cr-cap:focus-visible { outline: 1px solid var(--orange); outline-offset: 1px; }
+
+/* Typing the words. Flat and lit, so it does not read as a cue you could drag. */
+.cr-cap-edit {
+  font-family: var(--ui); font-size: 10px; color: var(--t1);
+  background: var(--panel); border: 1px solid var(--orange);
+  cursor: text; box-shadow: none;
+}

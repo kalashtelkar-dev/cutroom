@@ -40,6 +40,8 @@ import {
   bladeOps, dragMove, framesToPx, laneAtY, laneBoxes, lanesHeight, marqueeBox, marqueeHits,
   moveOps, nearestEdge, nextEdge, playheadLimit, pxToFrameAt, rippleDeleteOps, snapTolerance,
   trimClip, trimOps, type TrimEdge,
+  captionOps, captionSpan, captionTextOps, dragCaption, trimCaption,
+  type CaptionDragResult, type CaptionSpan,
 } from './interactions.ts';
 
 const HEADER_WIDTH = 172;
@@ -116,6 +118,17 @@ interface DragState {
   toTrack: TrackId;
   moved: boolean;
   result: { start: Frames; sourceRange: TimeRange } | null;
+  /**
+   * Set only when the thing being dragged is a cue.
+   *
+   * A caption has no media and no source range, so it cannot go through
+   * `trimClip`, and it must not overwrite the cue next to it, so it needs the
+   * walls `captionSpan` measured when the pointer went down. Two fields
+   * rather than a widened `result`, so nothing on the clip path has to learn
+   * about captions.
+   */
+  span: CaptionSpan | null;
+  capResult: CaptionDragResult | null;
 }
 
 /**
@@ -290,9 +303,13 @@ export function Timeline({
     edge: TrimEdge | null,
   ) => {
     const track = timeline.tracks.find((t) => t.id === placed.trackId);
-    if (!track || track.locked || !isClip(placed.item)) return;
+    const isCaption = placed.item.kind === 'caption';
+    if (!track || track.locked || (!isClip(placed.item) && !isCaption)) return;
 
     if (mode === 'blade' && !edge) {
+      // a blade cuts media at a frame; a cue is a sentence, and half a
+      // sentence twice is not an edit anybody asked for
+      if (isCaption) return;
       bladeOne(placed, frameAtClientX(e.clientX));
       return;
     }
@@ -302,7 +319,8 @@ export function Timeline({
     const grabbed = edge ?? (mode === 'trim' ? nearestEdge(placed.range, frameAtClientX(e.clientX)) : null);
     if (positionLock && !grabbed) return;
 
-    const el = (e.target as HTMLElement).closest<HTMLElement>('[data-clip-id]');
+    const el = (e.target as HTMLElement)
+      .closest<HTMLElement>(isCaption ? '[data-caption-id]' : '[data-clip-id]');
     if (!el) return;
 
     const box = boxes.find((b) => b.trackId === placed.trackId);
@@ -325,16 +343,22 @@ export function Timeline({
       },
       targets: targets.sort((a, b) => a - b),
       tolerance: snapTolerance(view.ppf),
-      media: timeline.media[placed.item.mediaKey],
+      media: isClip(placed.item) ? timeline.media[placed.item.mediaKey] : undefined,
       laneTop: box?.top ?? 0,
       toTrack: placed.trackId,
       moved: false,
       result: null,
+      // measured once, from the track as it is now: the walls cannot move
+      // during a drag because nothing else is moving
+      span: isCaption
+        ? captionSpan(placed, perTrack.find((pt) => pt.track.id === placed.trackId)?.placed ?? [])
+        : null,
+      capResult: null,
     };
     el.style.zIndex = '9';
     el.setPointerCapture(e.pointerId);
     e.preventDefault();
-  }, [boxes, bladeOne, frameAtClientX, mode, playhead, positionLock, timeline, view.ppf]);
+  }, [boxes, bladeOne, frameAtClientX, mode, perTrack, playhead, positionLock, timeline, view.ppf]);
 
   /**
    * Dropping a pool item onto a lane.
@@ -396,6 +420,28 @@ export function Timeline({
         snapping,
       };
 
+      /**
+       * A cue: its own maths, and it never changes lane.
+       *
+       * Both a move and a trim come back as a start and a duration, so the
+       * preview writes both `left` and `width` either way. Red means it is
+       * up against the cue next door, which is the whole of what "stop at
+       * the neighbour" looks like while the pointer is still down.
+       */
+      if (d.span) {
+        const r = d.edge
+          ? trimCaption({ ...shared, placed: d.placed, span: d.span, edge: d.edge, deltaPx: dx })
+          : dragCaption({ ...shared, placed: d.placed, span: d.span, deltaPx: dx });
+        d.capResult = r;
+        d.el.style.left = `${Math.round(framesToPx(r.start, view.ppf))}px`;
+        d.el.style.width = `${Math.max(3, framesToPx(r.duration, view.ppf))}px`;
+        showSnapLine(r.hit);
+        d.el.style.outline = r.clamped
+          ? '1px solid var(--red)'
+          : (d.edge ? '1px solid var(--green)' : '');
+        return;
+      }
+
       if (d.edge) {
         const r = trimClip({ ...shared, placed: d.placed, media: d.media, edge: d.edge, deltaPx: dx });
         d.result = { start: r.start, sourceRange: r.sourceRange };
@@ -443,6 +489,14 @@ export function Timeline({
       d.el.style.transform = d.originalStyle.transform;
       d.el.style.zIndex = d.originalStyle.zIndex;
       if (d.el.hasPointerCapture?.(e.pointerId)) d.el.releasePointerCapture(e.pointerId);
+
+      if (d.span) {
+        // a click that never moved is a selection, not an edit
+        if (!d.moved || !d.capResult) return;
+        const ops = captionOps(d.placed, d.capResult, d.placed.trackId);
+        if (ops.length) onEdit(ops, d.edge ? 'Retime caption' : 'Move caption');
+        return;
+      }
 
       if (!d.moved || !d.result) return; // a click that never moved is not an edit
       if (d.edge) {
@@ -842,7 +896,25 @@ export function Timeline({
                     const ops = removeTransitionOps(timeline, trackId, transitionId);
                     if (ops.length) onEdit(ops, 'Remove transition');
                   }}
+                  onCaptionText={(p, text) => {
+                    const ops = captionTextOps(p, text);
+                    if (ops.length) onEdit(ops, 'Edit caption');
+                  }}
                   onSelect={(p, additive) => {
+                    /**
+                     * A cue can be selected, and it selects nothing else.
+                     *
+                     * Linked selection pairs a picture clip with the sound
+                     * under it; a caption has no pair, and running it through
+                     * the pairing below would ask the document for a clip
+                     * that is not there.
+                     */
+                    if (p.item.kind === 'caption') {
+                      const only = new Set(additive ? selected : []);
+                      only.add(p.item.id);
+                      setSelection(only);
+                      return;
+                    }
                     if (!isClip(p.item)) return;
                     const next = new Set(additive ? selected : []);
                     next.add(p.item.id);

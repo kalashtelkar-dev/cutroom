@@ -24,6 +24,19 @@ import {
 
 const MAX_CANVAS_PX = 8192;
 
+/**
+ * Two presses on the same cue, inside this long and this close together,
+ * open its words.
+ *
+ * The distance is not decoration. Without it, dragging a cue and then
+ * dragging it again half a second later counts the second press as a double
+ * press, and the editor opens instead of the cue moving. Measured: it ate
+ * three gestures in a row in the browser proof. A double click is two
+ * presses in the same PLACE, which is the rule browsers themselves use.
+ */
+const DOUBLE_PRESS_MS = 450;
+const DOUBLE_PRESS_PX = 5;
+
 export interface LaneProps {
   track: Track;
   /** Everything on this track, already placed. Never recomputed here. */
@@ -42,13 +55,30 @@ export interface LaneProps {
   onGrab: (e: React.PointerEvent<HTMLElement>, placed: PlacedItem, edge: TrimEdge | null) => void;
   onSelect: (placed: PlacedItem, additive: boolean) => void;
   onRemoveTransition?: (trackId: string, transitionId: string) => void;
+  /** The words of a cue, after an in-place edit. Unchanged text is not an edit. */
+  onCaptionText?: (placed: PlacedItem, text: string) => void;
 }
 
 export function Lane({
   track, placed, media, rate, ppf, width, height, visible, variant,
-  selectedIds, silenced, onGrab, onSelect, onRemoveTransition,
+  selectedIds, silenced, onGrab, onSelect, onRemoveTransition, onCaptionText,
 }: LaneProps) {
   const canvas = useRef<HTMLCanvasElement | null>(null);
+  /** The cue whose words are being typed, if any. Local: nothing above cares. */
+  const [editing, setEditing] = useState<string | null>(null);
+  /**
+   * The last cue pressed, for spotting a double press ourselves.
+   *
+   * `onDoubleClick` never fires here: the drag grabs on `pointerdown` and
+   * calls `preventDefault`, which is what stops a drag from turning into a
+   * text selection, and it also stops the browser ever synthesising the
+   * `dblclick`. Measured in a real browser, where the handler sat there doing
+   * nothing. So the double press is counted here instead, which is what the
+   * pointer actually did either way.
+   */
+  const lastPress = useRef<{ id: string; at: number; x: number; y: number }>(
+    { id: '', at: 0, x: 0, y: 0 },
+  );
 
   const originPx = toPx(visible.start, ppf);
   const windowPx = Math.min(MAX_CANVAS_PX, Math.max(1, toPx(visible.duration, ppf)));
@@ -176,36 +206,127 @@ export function Lane({
 
       {visibleCaptions.map((p) => {
         const caption = p.item as Caption;
-        const width = toPx(p.range.duration, ppf);
+        // a cue can be a few frames long; below this it is a sliver nobody
+        // can hit, and a sliver you cannot click is not an item
+        const width = Math.max(3, toPx(p.range.duration, ppf));
+        const left = Math.round(toPx(p.range.start, ppf));
+        const box = {
+          position: 'absolute' as const,
+          top: CLIP_INSET,
+          height: clipHeight,
+          left,
+          width,
+          opacity: dimmed ? 0.5 : 1,
+        };
+
+        /**
+         * Editing the words happens in place.
+         *
+         * whisperx gets a name or a number wrong and everything else right,
+         * and the alternative to fixing that word here is re-running a GPU
+         * job over the whole clip to change five characters.
+         */
+        if (editing === caption.id) {
+          return (
+            <input
+              key={caption.id}
+              className="cr-cap cr-cap-edit"
+              data-caption-id={caption.id}
+              defaultValue={caption.text}
+              autoFocus
+              aria-label={`Caption text at ${p.range.start}`}
+              // the lane must not treat this as a drag or a band-select
+              onPointerDown={(e) => e.stopPropagation()}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') { e.currentTarget.blur(); return; }
+                if (e.key === 'Escape') {
+                  // put it back the way it was, then leave without an edit
+                  e.currentTarget.value = caption.text;
+                  e.currentTarget.blur();
+                }
+                e.stopPropagation();   // or Delete and the transport shortcuts fire
+              }}
+              onBlur={(e) => {
+                setEditing(null);
+                onCaptionText?.(p, e.currentTarget.value);
+              }}
+              style={{ ...box, zIndex: 6 }}
+            />
+          );
+        }
+
+        /**
+         * One element per cue, with its handles inside it.
+         *
+         * A drag writes `left` and `width` straight onto this node and leaves
+         * React out of it until the pointer comes up, exactly as a clip drag
+         * does, so the handles have to be children or they would stay behind
+         * while the cue they belong to moves. A div rather than the button
+         * this was, for the same reason `ClipView` is one: a button may not
+         * hold the two handles, and `role="option"` with a key handler is
+         * what the lane is, a list you pick from.
+         */
         return (
-          <button
-            type="button"
+          <div
             key={caption.id}
             className="cr-cap"
             data-caption-id={caption.id}
             data-selected={selectedIds.has(caption.id) ? 'true' : undefined}
             data-off={caption.enabled ? undefined : 'true'}
-            title={`${caption.text}\n${p.range.duration} frames`}
+            role="option"
+            aria-selected={selectedIds.has(caption.id)}
+            tabIndex={0}
+            title={`${caption.text}\n${p.range.duration} frames. Drag to move, drag an edge to retime, double-click to edit the words`}
             onPointerDown={(e) => {
-              if (track.locked) return;
+              if (track.locked || e.button !== 0) return;
+              const now = e.timeStamp || Date.now();
+              const last = lastPress.current;
+              const again = last.id === caption.id
+                && now - last.at < DOUBLE_PRESS_MS
+                && Math.abs(e.clientX - last.x) <= DOUBLE_PRESS_PX
+                && Math.abs(e.clientY - last.y) <= DOUBLE_PRESS_PX;
+              lastPress.current = { id: caption.id, at: now, x: e.clientX, y: e.clientY };
+              if (again) { setEditing(caption.id); return; }
               onSelect(p, e.shiftKey || e.metaKey || e.ctrlKey);
-              // null: a caption has no media to trim into, so its edges move
-              // its duration rather than its in-point
               onGrab(e, p, null);
             }}
-            style={{
-              position: 'absolute',
-              top: CLIP_INSET,
-              height: clipHeight,
-              left: Math.round(toPx(p.range.start, ppf)),
-              // a cue can be a few frames long; below this it is a sliver
-              // nobody can hit, and a sliver you cannot click is not an item
-              width: Math.max(3, width),
-              opacity: dimmed ? 0.5 : 1,
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !track.locked) {
+                e.preventDefault();
+                setEditing(caption.id);
+                return;
+              }
+              if (e.key === ' ') { e.preventDefault(); onSelect(p, false); }
             }}
+            style={box}
           >
             <span>{caption.text}</span>
-          </button>
+
+            {!track.locked && width > 14 && (['in', 'out'] as const).map((edge) => (
+              <div
+                key={edge}
+                data-caption-edge={edge}
+                role="separator"
+                aria-label={`${edge === 'in' ? 'Start' : 'End'} of caption "${caption.text}"`}
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                  if (e.button !== 0) return;
+                  onSelect(p, false);
+                  onGrab(e, p, edge);
+                }}
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  bottom: 0,
+                  left: edge === 'in' ? 0 : undefined,
+                  right: edge === 'out' ? 0 : undefined,
+                  width: 5,
+                  cursor: 'ew-resize',
+                  zIndex: 5,
+                }}
+              />
+            ))}
+          </div>
         );
       })}
 

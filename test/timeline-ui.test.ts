@@ -20,6 +20,7 @@ import {
   moveOps, nearestEdge, nextEdge, playheadLimit, ppfFromZoom, pxToFrameAt, pxToFrames,
   rippleDeleteOps, rippleShifts, snapMove, snapTolerance, snapValue, ticksIn, transitionBox,
   trimClip, trimOps, visibleRange, zoomFromPpf,
+  captionSpan, dragCaption, trimCaption, captionOps, captionTextOps,
 } from '../components/timeline/interactions.ts';
 
 // ── fixtures ────────────────────────────────────────────────────────────
@@ -900,5 +901,216 @@ describe('semantic colours', () => {
       });
     }
     assert.deepEqual(offenders, [], `framesToSeconds and rateFps exist:\n${offenders.join('\n')}`);
+  });
+});
+
+// ── captions on the timeline ────────────────────────────────────────────
+
+/**
+ * A subtitle track with three cues, gaps between them:
+ *   one [24,48)   two [72,96)   three [120,144)
+ *
+ * The gaps are the room a cue can be dragged into; the cues either side are
+ * the walls it stops at.
+ */
+function captionFixture(): Timeline {
+  const t = emptyTimeline('tl_c', 'Captions', RATE);
+  const track: Track = {
+    id: 'trk_s1', kind: 'subtitle', name: 'Subtitles 1',
+    locked: false, muted: false, solo: false, enabled: true, autoSelect: true,
+    items: [
+      { id: 'g0', kind: 'gap', duration: F(24) },
+      { id: 'cap1', kind: 'caption', text: 'one', duration: F(24), enabled: true },
+      { id: 'g1', kind: 'gap', duration: F(24) },
+      { id: 'cap2', kind: 'caption', text: 'two', duration: F(24), enabled: true },
+      { id: 'g2', kind: 'gap', duration: F(24) },
+      { id: 'cap3', kind: 'caption', text: 'three', duration: F(24), enabled: true },
+    ],
+  };
+  return { ...t, tracks: [...t.tracks, track] };
+}
+
+const capPlaced = (t: Timeline, id: string): PlacedItem => {
+  const all = placeTrack(trackOf(t, 'trk_s1')).map((p) => ({ ...p, trackId: 'trk_s1' as const }));
+  const found = all.find((p) => p.item.id === id);
+  assert.ok(found, `fixture is missing caption ${id}`);
+  return found;
+};
+
+const capAll = (t: Timeline): PlacedItem[] =>
+  placeTrack(trackOf(t, 'trk_s1')).map((p) => ({ ...p, trackId: 'trk_s1' as const }));
+
+const CAP_BASE = { ppf: 1, targets: [] as Frames[], tolerance: F(0), snapping: false };
+
+describe('the room a cue has', () => {
+  test('the fixture is three cues with gaps between them', () => {
+    const t = captionFixture();
+    assert.deepEqual(
+      capAll(t).filter((p) => p.item.kind === 'caption').map((p) => p.range.start),
+      [F(24), F(72), F(120)],
+    );
+  });
+
+  test('a cue between two others is walled by both', () => {
+    const t = captionFixture();
+    assert.deepEqual(captionSpan(capPlaced(t, 'cap2'), capAll(t)), { lo: F(48), hi: F(120) });
+  });
+
+  test('the first cue can go back to zero, the last one runs on forever', () => {
+    const t = captionFixture();
+    assert.equal(captionSpan(capPlaced(t, 'cap1'), capAll(t)).lo, F(0));
+    assert.equal(captionSpan(capPlaced(t, 'cap3'), capAll(t)).hi, Number.MAX_SAFE_INTEGER);
+  });
+
+  test('gaps are room, not walls', () => {
+    // the whole point: a cue may be dragged through empty time freely
+    const t = captionFixture();
+    const span = captionSpan(capPlaced(t, 'cap2'), capAll(t));
+    assert.ok(span.hi - span.lo > capPlaced(t, 'cap2').range.duration);
+  });
+});
+
+describe('dragging a cue', () => {
+  test('a drag moves it and never changes its length', () => {
+    const t = captionFixture();
+    const placed = capPlaced(t, 'cap2');
+    const r = dragCaption({
+      ...CAP_BASE, placed, span: captionSpan(placed, capAll(t)), deltaPx: -12,
+    });
+    assert.deepEqual({ start: r.start, duration: r.duration }, { start: F(60), duration: F(24) });
+    assert.equal(r.clamped, false);
+  });
+
+  test('it stops at the cue before it rather than overwriting the words', () => {
+    const t = captionFixture();
+    const placed = capPlaced(t, 'cap2');
+    const r = dragCaption({
+      ...CAP_BASE, placed, span: captionSpan(placed, capAll(t)), deltaPx: -600,
+    });
+    assert.equal(r.start, F(48), 'flush against the end of cue one');
+    assert.equal(r.duration, F(24));
+    assert.equal(r.clamped, true, 'and says so, so the UI can paint it red');
+  });
+
+  test('it stops at the cue after it, measured from its own tail', () => {
+    const t = captionFixture();
+    const placed = capPlaced(t, 'cap2');
+    const r = dragCaption({
+      ...CAP_BASE, placed, span: captionSpan(placed, capAll(t)), deltaPx: 600,
+    });
+    assert.equal(r.start, F(96), 'its end lands exactly on cue three');
+    assert.equal(r.clamped, true);
+  });
+
+  test('the first cue cannot be dragged before frame zero', () => {
+    const t = captionFixture();
+    const placed = capPlaced(t, 'cap1');
+    const r = dragCaption({
+      ...CAP_BASE, placed, span: captionSpan(placed, capAll(t)), deltaPx: -600,
+    });
+    assert.equal(r.start, F(0));
+  });
+
+  test('a snap is still bounded by the neighbour', () => {
+    const t = captionFixture();
+    const placed = capPlaced(t, 'cap2');
+    const r = dragCaption({
+      ...CAP_BASE, placed, span: captionSpan(placed, capAll(t)),
+      deltaPx: -20, snapping: true, targets: [F(24)], tolerance: F(30),
+    });
+    assert.equal(r.start, F(48), 'the snap target sits inside cue one, so the wall wins');
+    assert.equal(r.hit, null, 'and no snap line is drawn for a snap that did not happen');
+  });
+});
+
+describe('trimming a cue', () => {
+  test('the in-edge moves the start and leaves the end alone', () => {
+    const t = captionFixture();
+    const placed = capPlaced(t, 'cap2');
+    const r = trimCaption({
+      ...CAP_BASE, placed, span: captionSpan(placed, capAll(t)), edge: 'in', deltaPx: 12,
+    });
+    assert.deepEqual({ start: r.start, duration: r.duration }, { start: F(84), duration: F(12) });
+    assert.equal(r.start + r.duration, 96);
+  });
+
+  test('the out-edge moves the end and leaves the start alone', () => {
+    const t = captionFixture();
+    const placed = capPlaced(t, 'cap2');
+    const r = trimCaption({
+      ...CAP_BASE, placed, span: captionSpan(placed, capAll(t)), edge: 'out', deltaPx: 12,
+    });
+    assert.deepEqual({ start: r.start, duration: r.duration }, { start: F(72), duration: F(36) });
+  });
+
+  test('neither edge can be pulled through the other', () => {
+    const t = captionFixture();
+    const placed = capPlaced(t, 'cap2');
+    const span = captionSpan(placed, capAll(t));
+    const inward = trimCaption({ ...CAP_BASE, placed, span, edge: 'in', deltaPx: 600 });
+    assert.equal(inward.duration, F(1), 'a cue is at least one frame');
+    const outward = trimCaption({ ...CAP_BASE, placed, span, edge: 'out', deltaPx: -600 });
+    assert.equal(outward.duration, F(1));
+    assert.equal(outward.start, F(72), 'and the out-trim did not move it');
+  });
+
+  test('an edge stops at the neighbouring cue', () => {
+    const t = captionFixture();
+    const placed = capPlaced(t, 'cap2');
+    const span = captionSpan(placed, capAll(t));
+    assert.equal(trimCaption({ ...CAP_BASE, placed, span, edge: 'in', deltaPx: -600 }).start, F(48));
+    const out = trimCaption({ ...CAP_BASE, placed, span, edge: 'out', deltaPx: 600 });
+    assert.equal(out.start + out.duration, 120, 'flush against cue three');
+    assert.equal(out.clamped, true);
+  });
+});
+
+describe('what a finished caption drag changes', () => {
+  test('a drag that landed where it started is not an edit', () => {
+    const t = captionFixture();
+    const placed = capPlaced(t, 'cap2');
+    assert.deepEqual(
+      captionOps(placed, { start: F(72), duration: F(24), hit: null, clamped: false }, 'trk_s1'),
+      [],
+    );
+  });
+
+  test('the ops applied give the document the drag promised', () => {
+    const t = captionFixture();
+    const placed = capPlaced(t, 'cap2');
+    const ops = captionOps(placed, { start: F(60), duration: F(30), hit: null, clamped: false }, 'trk_s1');
+    assert.equal(
+      laidOut(t, ops, 'trk_s1'),
+      'gap[0,24) caption[24,48) gap[48,60) caption[60,90) gap[90,120) caption[120,144)',
+      'cue two moved and resized, cues one and three did not budge',
+    );
+  });
+
+  test('a clip is not a caption and gets no caption ops', () => {
+    const t = fixture();
+    assert.deepEqual(
+      captionOps(placedOf(t, 'c1'), { start: F(0), duration: F(48), hit: null, clamped: false }, 'trk_v1'),
+      [],
+    );
+  });
+
+  test('editing the words is a patch, and blank or unchanged text is not an edit', () => {
+    const t = captionFixture();
+    const placed = capPlaced(t, 'cap2');
+    assert.deepEqual(captionTextOps(placed, '  तीन  '), [
+      { op: 'patch_caption', captionId: 'cap2', set: { text: 'तीन' } },
+    ]);
+    assert.deepEqual(captionTextOps(placed, 'two'), []);
+    assert.deepEqual(captionTextOps(placed, '   '), []);
+  });
+
+  test('the edited words reach the document and the timing does not move', () => {
+    const t = captionFixture();
+    const placed = capPlaced(t, 'cap2');
+    const after = applyEdits(t, captionTextOps(placed, 'edited')).timeline;
+    const cue = placeTrack(trackOf(after, 'trk_s1')).find((p) => p.item.id === 'cap2');
+    assert.equal(cue?.item.kind === 'caption' ? cue.item.text : null, 'edited');
+    assert.equal(cue?.range.start, F(72));
+    assert.equal(cue?.range.duration, F(24));
   });
 });

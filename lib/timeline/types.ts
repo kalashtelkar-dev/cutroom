@@ -198,6 +198,23 @@ export type EditOp =
   | { op: 'remove_caption'; captionId: string; ripple?: boolean }
   | { op: 'patch_caption'; captionId: string; set: Partial<Pick<Caption, 'text' | 'duration' | 'enabled' | 'style'>> }
   /**
+   * Retime a cue: drag it along, or pull one of its edges.
+   *
+   * `duration` rides along with the position because both are the same lift
+   * and drop, and because the other way round is wrong. A position on a track
+   * is the sum of the durations before it, so setting a new duration through
+   * `patch_caption` moves every cue after it: shorten one line by 12 frames
+   * and the rest of the subtitles slide 12 frames early, which is the marker
+   * bug with a different name. This op lifts the cue, leaves the hole it was
+   * in, and drops it at its new place, so nothing else on the track moves.
+   *
+   * It overwrites what it lands on, exactly as `move_clip` does. The drag
+   * that produces it stops at the neighbouring cue (`captionSpan`), so on the
+   * timeline nothing can be overwritten by accident; a caller building this
+   * op by hand is trusted to mean it.
+   */
+  | { op: 'move_caption'; captionId: string; trackId: TrackId; to: Frames; duration?: Frames }
+  /**
    * The media pool is part of the document, so putting a file in it is an
    * edit like any other: atomic with whatever else is in the batch, and
    * undoable. An import that added media outside the edit system would be a

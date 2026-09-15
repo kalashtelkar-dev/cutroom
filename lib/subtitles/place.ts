@@ -11,6 +11,7 @@
 import type { Caption, EditOp, Timeline, Track, TrackId } from '../timeline/types.ts';
 import { frames, ZERO, type Frames, type Rate } from '../time/frames.ts';
 import { placeTrack } from '../timeline/document.ts';
+import { addTrackOp } from '../timeline/addTrack.ts';
 import { parseSrt, toSrt, type Cue } from './srt.ts';
 
 /** A stable id per cue, so re-running a transcription replaces rather than stacks. */
@@ -28,6 +29,17 @@ export interface PlaceOptions {
   /** Everything after this is offset, for a clip that is not at zero. */
   offset?: Frames;
   style?: Caption['style'];
+  /**
+   * Make the subtitle track when the project has none, in this same batch.
+   *
+   * Not a convenience. A plan that adds the track as its own step cannot
+   * work: `commit` applies a batch to the document as it was when the run
+   * started, so a second commit built from that same document would throw
+   * over the track the first one added, or drop it. One batch is the only
+   * shape that holds, and it is one undo, which is what the user expects
+   * from one button anyway.
+   */
+  createTrack?: boolean;
 }
 
 /** The subtitle track a caption should land on, or null if there is none. */
@@ -52,17 +64,28 @@ export function placeCuesOps(
   opts: PlaceOptions = {},
 ): EditOp[] {
   const track = subtitleTrack(timeline, opts.trackId);
-  if (!track) throw new Error('this project has no subtitle track to put captions on');
+  if (!track && !(opts.createTrack && !opts.trackId)) {
+    throw new Error('this project has no subtitle track to put captions on');
+  }
 
   const offset = opts.offset ?? ZERO;
   const seed = opts.seed ?? 'srt';
   const ops: EditOp[] = [];
 
-  // out with the old, in document order, so the inverse of the batch puts
-  // them back where they were
-  for (const placed of placeTrack(track)) {
-    if (placed.item.kind === 'caption') ops.push({ op: 'remove_caption', captionId: placed.item.id });
-    else if (placed.item.kind === 'clip') ops.push({ op: 'remove_clip', clipId: placed.item.id });
+  let trackId: TrackId;
+  if (track) {
+    trackId = track.id;
+    // out with the old, in document order, so the inverse of the batch puts
+    // them back where they were
+    for (const placed of placeTrack(track)) {
+      if (placed.item.kind === 'caption') ops.push({ op: 'remove_caption', captionId: placed.item.id });
+      else if (placed.item.kind === 'clip') ops.push({ op: 'remove_clip', clipId: placed.item.id });
+    }
+  } else {
+    const add = addTrackOp(timeline, 'subtitle');
+    if (add.op !== 'add_track') throw new Error('addTrackOp did not return an add_track op');
+    ops.push(add);
+    trackId = add.track.id as TrackId;
   }
 
   cues.forEach((cue, n) => {
@@ -76,7 +99,7 @@ export function placeCuesOps(
     };
     ops.push({
       op: 'add_caption',
-      trackId: track.id,
+      trackId,
       caption,
       at: frames(Math.max(0, cue.start + offset)),
     });

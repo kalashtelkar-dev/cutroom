@@ -249,3 +249,123 @@ describe('captions survive being saved', () => {
     assert.equal(captionAt(back, f(24))?.text, 'Hello there');
   });
 });
+
+/**
+ * Retiming a cue.
+ *
+ * The defect this is written against is not hypothetical: a position on a
+ * track is the sum of the durations before it, so setting a new duration
+ * through `patch_caption` slides every later cue by the difference. Every
+ * test here asserts on the cues that were NOT touched.
+ */
+describe('moving and retiming a cue', () => {
+  /** Three cues with a gap between each, at frames anybody can check by eye. */
+  function threeCues(): Timeline {
+    const before = withSubtitleTrack();
+    return applyEdits(before, placeCuesOps(before, [
+      { start: f(24), duration: f(24), text: 'one' },
+      { start: f(72), duration: f(24), text: 'two' },
+      { start: f(120), duration: f(24), text: 'three' },
+    ], { seed: 'x' })).timeline;
+  }
+
+  const idAt = (t: Timeline, at: number) => captionAt(t, f(at))?.id;
+
+  test('the fixture is what these tests think it is', () => {
+    const t = threeCues();
+    assert.deepEqual(cuesOf(t).map((c) => c.start), [f(24), f(72), f(120)]);
+  });
+
+  test('a cue moves and the cues around it do not', () => {
+    const t = threeCues();
+    const moved = applyEdits(t, [{
+      op: 'move_caption', captionId: idAt(t, 72)!, trackId: 'trk_s1', to: f(60),
+    }]).timeline;
+
+    assert.deepEqual(cuesOf(moved), [
+      { start: f(24), duration: f(24), text: 'one' },
+      { start: f(60), duration: f(24), text: 'two' },
+      { start: f(120), duration: f(24), text: 'three' },
+    ]);
+  });
+
+  test('a shorter cue does not drag the rest of the track left', () => {
+    // patch_caption { duration } would have moved "three" to frame 108
+    const t = threeCues();
+    const trimmed = applyEdits(t, [{
+      op: 'move_caption', captionId: idAt(t, 72)!, trackId: 'trk_s1', to: f(72), duration: f(12),
+    }]).timeline;
+
+    assert.deepEqual(cuesOf(trimmed), [
+      { start: f(24), duration: f(24), text: 'one' },
+      { start: f(72), duration: f(12), text: 'two' },
+      { start: f(120), duration: f(24), text: 'three' },
+    ]);
+  });
+
+  test('pulling the in-edge later keeps the out-edge where it was', () => {
+    const t = threeCues();
+    // the drag hands over both halves of the answer: a later start AND the
+    // duration that leaves the end alone
+    const retimed = applyEdits(t, [{
+      op: 'move_caption', captionId: idAt(t, 72)!, trackId: 'trk_s1', to: f(84), duration: f(12),
+    }]).timeline;
+    const two = cuesOf(retimed)[1];
+    assert.equal(two.start, f(84));
+    assert.equal(two.start + two.duration, 96, 'the out point has not moved');
+  });
+
+  test('a longer cue grows into the gap and nothing after it shifts', () => {
+    const t = threeCues();
+    const grown = applyEdits(t, [{
+      op: 'move_caption', captionId: idAt(t, 72)!, trackId: 'trk_s1', to: f(72), duration: f(48),
+    }]).timeline;
+    assert.deepEqual(cuesOf(grown), [
+      { start: f(24), duration: f(24), text: 'one' },
+      { start: f(72), duration: f(48), text: 'two' },
+      { start: f(120), duration: f(24), text: 'three' },
+    ]);
+  });
+
+  test('undo puts it back exactly, words and frames', () => {
+    const t = threeCues();
+    const { timeline: moved, inverse } = applyEdits(t, [{
+      op: 'move_caption', captionId: idAt(t, 72)!, trackId: 'trk_s1', to: f(48), duration: f(36),
+    }]);
+    assert.notDeepEqual(cuesOf(moved), cuesOf(t));
+    assert.deepEqual(applyEdits(moved, inverse).timeline.tracks, t.tracks);
+  });
+
+  test('a cue cannot be trimmed away to nothing', () => {
+    const t = threeCues();
+    assert.throws(() => applyEdits(t, [{
+      op: 'move_caption', captionId: idAt(t, 72)!, trackId: 'trk_s1', to: f(72), duration: f(0),
+    }]), /cannot be trimmed to nothing/);
+  });
+
+  test('a locked track refuses, and the document is untouched', () => {
+    const t = threeCues();
+    const locked = applyEdits(t, [{ op: 'patch_track', trackId: 'trk_s1', set: { locked: true } }]).timeline;
+    assert.throws(() => applyEdits(locked, [{
+      op: 'move_caption', captionId: idAt(t, 72)!, trackId: 'trk_s1', to: f(48),
+    }]), EditError);
+    assert.deepEqual(cuesOf(locked), cuesOf(t));
+  });
+
+  test('patch_caption { duration } is the trap this op exists to avoid', () => {
+    // not a wish: a position is the sum of the durations before it, so the
+    // "obvious" way to shorten a cue slides every cue after it off the speech
+    const t = threeCues();
+    const naive = applyEdits(t, [{
+      op: 'patch_caption', captionId: idAt(t, 72)!, set: { duration: f(12) },
+    }]).timeline;
+    assert.equal(cuesOf(naive)[2].start, f(108), 'the third cue moved, which is the bug');
+    assert.equal(cuesOf(t)[2].start, f(120));
+  });
+
+  test('a caption that is not there is an error, not a silent no-op', () => {
+    assert.throws(() => applyEdits(threeCues(), [{
+      op: 'move_caption', captionId: 'cap_nope', trackId: 'trk_s1', to: f(48),
+    }]), /no caption/);
+  });
+});

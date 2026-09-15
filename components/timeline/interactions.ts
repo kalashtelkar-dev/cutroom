@@ -14,7 +14,7 @@
  * downstream of those two functions is allowed to hold a pixel.
  */
 import {
-  ZERO, addFrames, clampFrames, frames, lastFrame, maxFrames, rangeEnd, rangesOverlap,
+  ZERO, addFrames, clampFrames, frames, lastFrame, maxFrames, minFrames, rangeEnd, rangesOverlap,
   secondsToFrames, subFrames, timeRange,
   type Frames, type Rate, type TimeRange,
 } from '../../lib/time/frames.ts';
@@ -472,6 +472,154 @@ export function moveOps(placed: PlacedItem, to: Frames, trackId: TrackId): EditO
   if (!isClip(placed.item)) return [];
   if (to === placed.range.start && trackId === placed.trackId) return [];
   return [{ op: 'move_clip', clipId: placed.item.id, trackId, to }];
+}
+
+// ── captions ────────────────────────────────────────────────────────────
+
+/**
+ * The room a cue has on its own track.
+ *
+ * A subtitle track shows one cue at a time, so two of them over the same
+ * frames means one of them is invisible and the words in it are lost with no
+ * way to see that they have gone. The drag therefore stops at the neighbour
+ * instead of overwriting it, and this is the pair of walls it stops at: the
+ * end of the cue before, and the start of the cue after. Gaps are not walls,
+ * they are the room.
+ *
+ * `hi` is UNBOUNDED when nothing follows, which is the honest answer: a cue
+ * can be dragged as far right as anyone likes into empty track.
+ */
+export interface CaptionSpan {
+  lo: Frames;
+  hi: Frames;
+}
+
+export function captionSpan(placed: PlacedItem, all: readonly PlacedItem[]): CaptionSpan {
+  let lo = ZERO;
+  let hi = UNBOUNDED;
+  const end = rangeEnd(placed.range);
+
+  for (const other of all) {
+    if (other.item.id === placed.item.id) continue;
+    if (other.item.kind === 'gap' || other.item.kind === 'transition') continue;
+    const otherEnd = rangeEnd(other.range);
+    if (otherEnd <= placed.range.start) lo = maxFrames(lo, otherEnd);
+    else if (other.range.start >= end) hi = minFrames(hi, other.range.start);
+  }
+  return { lo, hi };
+}
+
+export interface CaptionDragInput {
+  placed: PlacedItem;
+  span: CaptionSpan;
+  deltaPx: number;
+  ppf: number;
+  targets: readonly Frames[];
+  tolerance: Frames;
+  snapping: boolean;
+}
+
+export interface CaptionDragResult {
+  start: Frames;
+  duration: Frames;
+  hit: Frames | null;
+  /** True when the cue is up against a neighbour. The UI paints it red. */
+  clamped: boolean;
+}
+
+/**
+ * A cue dragged along its track.
+ *
+ * Same shape as `dragMove`: snap first, then clamp, so a cue snapped onto a
+ * cut that sits inside the neighbouring cue still stops at the neighbour
+ * rather than jumping through it. The duration never changes here, which is
+ * the point of dragging the body rather than an edge.
+ */
+export function dragCaption(i: CaptionDragInput): CaptionDragResult {
+  const duration = i.placed.range.duration;
+  const raw = maxFrames(ZERO, addFrames(i.placed.range.start, pxToFrames(i.deltaPx, i.ppf)));
+  const wanted = i.snapping
+    ? snapMove(raw, duration, i.targets, i.tolerance)
+    : { value: raw, hit: null as Frames | null };
+
+  const last = maxFrames(i.span.lo, subFrames(i.span.hi, duration));
+  const at = clampFrames(maxFrames(ZERO, wanted.value), i.span.lo, last);
+  return {
+    start: at,
+    duration,
+    hit: at === wanted.hit ? wanted.hit : null,
+    clamped: at !== wanted.value,
+  };
+}
+
+/**
+ * One edge of a cue.
+ *
+ * The in-edge moves where the words appear and shortens the cue by the same
+ * amount, so the other edge stays on the frame it was on. There is no source
+ * media behind a caption, so nothing bounds either edge except the
+ * neighbouring cue and the cue's own other edge.
+ */
+export function trimCaption(i: CaptionDragInput & {
+  edge: TrimEdge;
+  minDuration?: Frames;
+}): CaptionDragResult {
+  const start = i.placed.range.start;
+  const end = rangeEnd(i.placed.range);
+  const min = i.minDuration ?? frames(1);
+  const wantedRaw = addFrames(i.edge === 'in' ? start : end, pxToFrames(i.deltaPx, i.ppf));
+  const snapped = i.snapping
+    ? snapValue(wantedRaw, i.targets, i.tolerance)
+    : { value: wantedRaw, hit: null as Frames | null };
+
+  if (i.edge === 'in') {
+    const at = clampFrames(snapped.value, i.span.lo, subFrames(end, min));
+    return {
+      start: at,
+      duration: subFrames(end, at),
+      hit: at === snapped.hit ? snapped.hit : null,
+      clamped: at !== snapped.value,
+    };
+  }
+
+  const to = clampFrames(snapped.value, addFrames(start, min), i.span.hi);
+  return {
+    start,
+    duration: subFrames(to, start),
+    hit: to === snapped.hit ? snapped.hit : null,
+    clamped: to !== snapped.value,
+  };
+}
+
+/** What a finished caption drag or trim changes, or nothing if it changed nothing. */
+export function captionOps(
+  placed: PlacedItem,
+  result: CaptionDragResult,
+  trackId: TrackId,
+): EditOp[] {
+  const caption = placed.item;
+  if (caption.kind !== 'caption') return [];
+  if (result.start === placed.range.start
+    && result.duration === placed.range.duration
+    && trackId === placed.trackId) {
+    return [];
+  }
+  return [{
+    op: 'move_caption',
+    captionId: caption.id,
+    trackId,
+    to: result.start,
+    duration: result.duration,
+  }];
+}
+
+/** The words of a cue, changed. Empty text is a removal, and this is not it. */
+export function captionTextOps(placed: PlacedItem, text: string): EditOp[] {
+  const caption = placed.item;
+  if (caption.kind !== 'caption') return [];
+  const next = text.trim();
+  if (!next || next === caption.text) return [];
+  return [{ op: 'patch_caption', captionId: caption.id, set: { text: next } }];
 }
 
 // ── the visible window ──────────────────────────────────────────────────
