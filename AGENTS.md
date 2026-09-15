@@ -96,6 +96,18 @@ the authority; local is just faster for repair loops.
 the same structural pass first so you get told which field is missing;
 `GraphBuilder.build()` sets both, so prefer it to hand-writing nodes.
 
+**The playback loop re-renders on a signature, so the signature is the
+picture.** The viewer does not re-render per frame: a rAF loop compares
+`activeTimelineSignature` in `components/viewer/onscreen.ts` and tells React
+the position only when that string moves. Anything drawn from `position` and
+missing from the signature is painted once, at the frame playback started, and
+then frozen. Captions were missing from it, so subtitles were correct, visible
+while scrubbing, and gone the moment you pressed play. Add to the signature
+whenever you add something to the frame, and read it from the same function
+that draws the thing, not a second walk of the tracks. `npm run
+prove:caption-playback` presses Play in a real browser and reads the words back
+out of the DOM against the clock's own timecode.
+
 **A subtitle is an item in the document, not a file in the pool.**
 `lib/subtitles/srt.ts` is the only place SRT and the timeline meet, exactly as
 `otio.ts` is the only place `RationalTime` appears. SRT's end time is
@@ -185,6 +197,7 @@ rename turns the test into a no-op that reports success forever.
     npm run prove:session    # remove a file, refresh the page, and see the project survive
     npm run cards            # every card's pipeline exists and takes what the plan binds
     npm run prove:captions   # a caption reaches the rendered pixels
+    npm run prove:caption-playback  # press Play: the cues are on screen, in order
 
 Edit an intel card in `lib/intel/cards/*.md`, run `npm run intel`, then
 `npm test`, the eval suite runs the real router over 15 things a person would

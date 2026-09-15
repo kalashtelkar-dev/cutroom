@@ -182,6 +182,7 @@ export function Lane({
             type="button"
             key={caption.id}
             className="cr-cap"
+            data-caption-id={caption.id}
             data-selected={selectedIds.has(caption.id) ? 'true' : undefined}
             data-off={caption.enabled ? undefined : 'true'}
             title={`${caption.text}\n${p.range.duration} frames`}

@@ -39,6 +39,7 @@ import { DEFAULT_CLIP_PARAMS, type ClipParams } from '../inspector/Inspector.tsx
 import { tip } from '../ui/Tooltip.tsx';
 import { captionAt } from '@/lib/subtitles/place.ts';
 import { Layers, type LayerSpec, type AudioSpec } from './Layers.tsx';
+import { activeTimelineSignature } from './onscreen.ts';
 import { timelineHasAudioTracks } from './sound.ts';
 import { COMPOSITE_EFFECT } from '@/lib/inspector/effects.ts';
 import { frameKeyAt } from '../../lib/media/frameAt.ts';
@@ -97,23 +98,6 @@ function trackLevel(track: Track): number {
   return Number(fromName ?? fromId ?? 0) || 0;
 }
 
-function activeTimelineSignature(timeline: Timeline, at: Frames): string {
-  let sig = '';
-  for (const track of timeline.tracks) {
-    if (!track.enabled) continue;
-    const placed = itemAt(track, at);
-    if (!placed || !isClip(placed.item) || !placed.item.enabled) {
-      sig += `${track.id}:none;`;
-    } else {
-      const media = timeline.media[placed.item.mediaKey];
-      const fk = (!media?.proxy && media)
-        ? frameKeyAt(media, placed.item.sourceRange.start + (at - placed.range.start)) ?? ''
-        : '';
-      sig += `${track.id}:${placed.item.id}:${placed.range.start}:${fk};`;
-    }
-  }
-  return sig;
-}
 
 export function Viewer({
   timeline,
@@ -543,7 +527,11 @@ function isTrackAudible(track: Track, allTracks: Track[]): boolean {
               * the timeline moves here with no reload.
               */}
             {caption ? (
-              <div className="cr-vcap" data-place={caption.style?.place ?? 'bottom'}>
+              <div
+                className="cr-vcap"
+                data-caption-id={caption.id}
+                data-place={caption.style?.place ?? 'bottom'}
+              >
                 <span
                   style={{
                     ...(caption.style?.size ? { fontSize: `${(caption.style.size / 1080) * 100}cqh` } : {}),
@@ -723,10 +711,19 @@ const CSS = `
   min-height:0;position:relative;overflow:hidden;
 }
 /* the frame the layers composite inside: a fixed 16:9 box so a layer with a
-   different shape letterboxes rather than resizing the panel */
+   different shape letterboxes rather than resizing the panel.
+
+   It is the query container, and it has to be this element rather than the
+   caption box: cqw and cqh resolve against an ANCESTOR container, never
+   against the element declaring one, so a .cr-vcap that was its own container
+   measured its own padding against the window. In a 2560px window a 520px
+   frame was given 153.6px of padding a side, which left 212px for the words
+   and shrank the type with it. Sizing here is safe because this box is sized
+   by its width, height and ratio and never by what is inside it. */
 .cr-vframe{
   position:relative;width:100%;height:100%;max-width:100%;max-height:100%;
   aspect-ratio:16/9;background:var(--app);overflow:hidden;isolation:isolate;
+  container-type:size;
 }
 .cr-vframe video,.cr-vframe img{display:block}
 .cr-vempty{
@@ -739,7 +736,7 @@ const CSS = `
    what cqh gives and what px cannot. */
 .cr-vcap{
   position:absolute;inset:0;display:flex;justify-content:center;
-  pointer-events:none;z-index:40;container-type:size;
+  pointer-events:none;z-index:40;
   padding:0 6cqw 4cqh;
 }
 .cr-vcap[data-place="bottom"]{align-items:flex-end}

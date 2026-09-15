@@ -25,7 +25,8 @@
     "prove:concat": "node --experimental-strip-types scripts/prove-concat.ts",
     "prove:layers": "node --experimental-strip-types scripts/prove-layers.ts",
     "cards": "node --experimental-strip-types scripts/check-cards.ts",
-    "prove:captions": "node --experimental-strip-types scripts/prove-captions.ts"
+    "prove:captions": "node --experimental-strip-types scripts/prove-captions.ts",
+    "prove:caption-playback": "node --experimental-strip-types scripts/prove-caption-playback.ts"
   },
   "dependencies": {
     "next": "16.3.5",
