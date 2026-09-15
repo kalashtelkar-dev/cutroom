@@ -1,12 +1,31 @@
 {
-  "name": "cutroom-scaffold",
+  "name": "cutroom",
   "version": "0.1.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --experimental-strip-types test/*.test.ts",
+    "catalogue": "node --experimental-strip-types scripts/gen-catalogue.ts",
+    "xcheck": "node --experimental-strip-types scripts/xcheck-validate.ts",
+    "intel": "node --experimental-strip-types scripts/gen-intel.ts",
+    "tidy": "node --experimental-strip-types scripts/tidy.ts",
+    "prove": "node --experimental-strip-types scripts/prove-end-to-end.ts",
+    "agents": "node --experimental-strip-types scripts/agents.ts",
+    "smoke": "node scripts/smoke.mjs",
+    "prove:export": "node --experimental-strip-types scripts/prove-export.ts",
+    "fixtures": "node scripts/make-fixtures.mjs",
+    "prove:media": "node scripts/prove-media.mjs",
+    "pipeline": "node --experimental-strip-types scripts/make-pipeline.ts",
+    "prove:session": "node scripts/prove-session.mjs",
+    "prove:selection": "node --experimental-strip-types scripts/prove-selection.ts",
+    "prove:concat": "node --experimental-strip-types scripts/prove-concat.ts",
+    "prove:layers": "node --experimental-strip-types scripts/prove-layers.ts",
+    "cards": "node --experimental-strip-types scripts/check-cards.ts",
+    "prove:captions": "node --experimental-strip-types scripts/prove-captions.ts"
   },
   "dependencies": {
     "next": "16.3.5",
@@ -22,5 +41,7 @@
     "eslint-config-next": "16.3.5",
     "tailwindcss": "^4",
     "typescript": "^5"
-  }
+  },
+  "description": "AI video auto-editor for AISuite: tool-caller, timeline compiler and NLE.",
+  "type": "module"
 }

@@ -1,26 +1,440 @@
 @import "tailwindcss";
 
+/* ══════════════════════════════════════════════════════════════════════
+   Cutroom design tokens.
+
+   Single-theme by intent: a colour suite is dark, and a light variant
+   would misrepresent the product. Every colour is painted explicitly so
+   the page holds whatever ground it is composited over.
+
+   The palette follows AI Suite: a true black ground, surfaces barely
+   lifted off it, and shape carried by hairlines that are LIGHTER than the
+   fill rather than darker. Red is the action colour, selection, focus,
+   the active thing, and blue is reserved for data (charts, waveforms),
+   never for chrome.
+
+   The semantic colours are Resolve's documented ones and their meanings
+   are load-bearing, not decorative:
+     orange  selection, panel focus, active track destination
+     red     playhead
+     yellow  dynamic trim playhead
+     green   an active trim point
+   ══════════════════════════════════════════════════════════════════════ */
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  color-scheme: dark;
+
+  /* surfaces. The ground is black and surfaces barely lift off it; the
+     shape comes from hairlines that are LIGHTER than the fill, which is
+     what gives AI Suite its look. */
+  --app: #000000;
+  --tl: #050505;
+  --panel: #0a0a0a;
+  --panel-2: #101010;
+  --head: #121212;
+  --edge: #1e1e1e;
+  --edge-soft: #2a2a2a;
+  --lane-v: #0c0c0c;
+  --lane-a: #080808;
+  --ruler: #0d0d0d;
+  --ruler-h: 25px;
+
+  /* clips are neutral slabs, the picture carries the colour */
+  --clip-v: #1a1a1a;
+  --clip-v-bar: #262626;
+  --clip-b: #211a1f;
+  --clip-b-bar: #33262e;
+  --clip-a: #141414;
+  --clip-a-bar: #202020;
+  --wave: #3b74e0;
+  /* a subtitle cue: its own hue, because it is the one item on the timeline
+     that carries words rather than media and should not read as a clip */
+  --clip-s: #16191f;
+  --clip-s-bar: #222833;
+  --clip-edge: #2a2a2a;
+  /* Subtitle ink. White and near-black in BOTH themes on purpose: a caption
+     is drawn over the footage, so the picture is its ground, not the page.
+     Flipping it for a light theme would put white text on a bright shot. */
+  --caption-ink: #ffffff;
+  --caption-shade: rgba(0, 0, 0, 0.9);
+
+  /* red is the action colour; blue is for data, never for chrome */
+  --orange: #ed1b1b;
+  --orange-dim: #5a0f0f;
+  --red: #ff4a4a;
+  --yellow: #e0a82e;
+  --green: #35b96a;
+  --blue: #2f6fe8;
+
+  /* text that sits ON an accent fill. Red is dark enough to carry white and
+     the workbench blue is not, which is why they differ. */
+  --on-accent: #ffffff;
+
+  --t1: #ededed;
+  --t2: #8f8f8f;
+  --t3: #5c5c5c;
+  --ctl-off: #3a3a3a;
+  --ctl-on: #c4c4c4;
+
+  --wb: #3b82f6;
+  --wb-dim: #1e3a6e;
+  --wb-wash: rgba(59, 130, 246, 0.12);
+
+  --lift: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  --sink: 0 1px 0 rgba(0, 0, 0, 0.6);
+
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  --ui: "Barlow", system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
+/* expose the tokens to Tailwind utilities: bg-app, text-t2, border-edge… */
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-app: var(--app);
+  --color-tl: var(--tl);
+  --color-panel: var(--panel);
+  --color-panel-2: var(--panel-2);
+  --color-head: var(--head);
+  --color-edge: var(--edge);
+  --color-edge-soft: var(--edge-soft);
+  --color-on-accent: var(--on-accent);
+  --color-t1: var(--t1);
+  --color-t2: var(--t2);
+  --color-t3: var(--t3);
+  --color-orange: var(--orange);
+  --color-red: var(--red);
+  --color-yellow: var(--yellow);
+  --color-green: var(--green);
+  --color-blue: var(--blue);
+  --color-wb: var(--wb);
+  --font-ui: var(--ui);
+  --font-mono: var(--mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html,
+body {
+  height: 100%;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  margin: 0;
+  background: var(--app);
+  color: var(--t1);
+  font-family: var(--ui);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
 }
+
+:focus-visible {
+  outline: 2px solid var(--orange);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Host-level notice. One at a time, so it never stacks into a wall. */
+@keyframes toast-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(10px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+.cutroom-toast {
+  position: fixed;
+  bottom: 22px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 120;
+  max-width: min(460px, 88vw);
+  padding: 9px 14px;
+  border: 1px solid var(--edge-soft);
+  border-left: 2px solid var(--orange);
+  border-radius: 4px;
+  background: var(--head);
+  box-shadow: var(--lift), 0 8px 24px rgba(0, 0, 0, 0.6);
+  color: var(--t1);
+  font-size: 12px;
+  animation: toast-in 0.25s ease-out;
+}
+
+/* ── menu bar ──────────────────────────────────────────────
+   A real menu bar, not a row of buttons: it opens on click,
+   follows the pointer across the bar once open, and every row
+   carries either its shortcut or the reason it is unavailable. */
+.cr-menubar {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  height: 28px;
+  flex: none;
+  padding: 0 8px;
+  background: var(--app);
+  border-bottom: 1px solid var(--edge);
+  position: relative;
+  z-index: 40;
+  font-size: 12px;
+}
+.cr-menubar-sp { flex: 1; }
+.cr-menu { position: relative; }
+.cr-menu-title {
+  padding: 3px 9px;
+  border-radius: 4px;
+  color: var(--t2);
+  line-height: 1.4;
+}
+.cr-menu-title:hover { color: var(--t1); background: var(--panel-2); }
+.cr-menu-title.on { color: var(--t1); background: var(--panel-2); }
+
+.cr-menu-pop {
+  position: absolute;
+  top: calc(100% + 3px);
+  left: 0;
+  min-width: 232px;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--edge-soft);
+  border-radius: 6px;
+  box-shadow: var(--lift), 0 14px 40px rgba(0, 0, 0, 0.7);
+  z-index: 50;
+}
+.cr-menu-group + .cr-menu-group {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--edge);
+}
+.cr-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 8px;
+  border-radius: 4px;
+  color: var(--t1);
+  text-align: left;
+  line-height: 1.4;
+  transition: background 0.12s, color 0.12s;
+}
+.cr-menu-item:hover { background: var(--orange); color: #fff; }
+.cr-menu-item:hover .hint { color: rgba(255, 255, 255, 0.72); }
+.cr-menu-item.off { color: var(--t3); cursor: default; }
+.cr-menu-item.off:hover { background: transparent; color: var(--t3); }
+.cr-menu-item .tick { width: 11px; flex: none; color: var(--orange); font-size: 11px; }
+.cr-menu-item:hover .tick { color: #fff; }
+.cr-menu-item .label { flex: 1; min-width: 0; }
+.cr-menu-item .hint {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--t3);
+  padding-left: 14px;
+}
+.cr-project { display: flex; align-items: center; gap: 6px; color: var(--t2); font-size: 11.5px; }
+.cr-project .cr-dot {
+  width: 5px; height: 5px; border-radius: 50%;
+  background: var(--orange); display: block;
+}
+
+/* ── jobs panel ───────────────────────────────────────────── */
+.cr-jobs {
+  position: fixed; right: 0; top: 0; bottom: 0; width: min(460px, 92vw);
+  z-index: 110; display: flex; flex-direction: column;
+  background: var(--panel); border-left: 1px solid var(--edge-soft);
+  box-shadow: -14px 0 40px rgba(0, 0, 0, 0.6);
+  transform: translateX(0); transition: transform 0.22s ease-out;
+}
+.cr-jobs[data-closing] { transform: translateX(100%); }
+.cr-jobs-notif {
+  position: fixed; bottom: 56px; right: 16px; z-index: 109;
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 12px; border-radius: 6px;
+  background: var(--panel); border: 1px solid var(--edge-soft);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  font-size: 11.5px; color: var(--t2);
+  animation: toast-in 0.25s ease-out;
+}
+.cr-jobs-notif .dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+.cr-jobs-notif button {
+  font-size: 10.5px; color: var(--t2); padding: 2px 8px; border-radius: 4px;
+  background: var(--panel-2); border: 1px solid var(--edge-soft); cursor: pointer;
+}
+.cr-jobs-notif button:hover { border-color: var(--t3); color: var(--t1); }
+.cr-jobs header {
+  display: flex; align-items: center; gap: 8px; flex: none;
+  padding: 9px 12px; border-bottom: 1px solid var(--edge);
+  background: var(--head); box-shadow: var(--lift);
+}
+.cr-jobs header .sp { flex: 1; }
+.cr-jobs header .count { font-family: var(--mono); font-size: 10.5px; color: var(--t3); }
+.cr-jobs header button { color: var(--t2); font-size: 11.5px; padding: 3px 7px; border-radius: 4px; }
+.cr-jobs header button:hover { color: var(--t1); background: var(--panel-2); }
+.cr-jobs .empty { padding: 20px 14px; color: var(--t3); font-size: 12px; line-height: 1.5; }
+.cr-jobs ol { list-style: none; margin: 0; padding: 0; overflow-y: auto; }
+.cr-jobs li { border-bottom: 1px solid var(--edge); }
+.cr-jobs .row {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 8px 12px; text-align: left; font-size: 12px; color: var(--t1);
+}
+.cr-jobs .row:hover { background: var(--panel-2); }
+.cr-jobs .dot { width: 6px; height: 6px; border-radius: 50%; flex: none; display: block; }
+.cr-jobs .kind {
+  font-family: var(--mono); font-size: 9.5px; color: var(--t3);
+  text-transform: uppercase; letter-spacing: 0.06em; width: 62px; flex: none;
+}
+.cr-jobs .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cr-jobs .pct, .cr-jobs .ms {
+  font-family: var(--mono); font-size: 10px; color: var(--t3); flex: none;
+  font-variant-numeric: tabular-nums;
+}
+.cr-jobs .log { padding: 2px 12px 10px 34px; background: var(--tl); }
+.cr-jobs .log p { display: flex; gap: 8px; margin: 0; padding: 2px 0; font-size: 11px; line-height: 1.45; }
+.cr-jobs .log .at { font-family: var(--mono); font-size: 9.5px; color: var(--t3); flex: none; }
+.cr-jobs .log .lv { font-family: var(--mono); font-size: 9.5px; width: 34px; flex: none; }
+.cr-jobs .log .msg { color: var(--t2); }
+.cr-jobs .log .data { font-family: var(--mono); font-size: 9.5px; color: var(--t3); word-break: break-all; }
+.cr-jobs .trunc { color: var(--yellow); font-size: 10.5px; padding: 4px 0; }
+
+/* ── open project ─────────────────────────────────────────── */
+.cr-open {
+  position: fixed; inset: 0; z-index: 130; display: flex;
+  align-items: center; justify-content: center; padding: 20px;
+  background: rgba(0, 0, 0, 0.62);
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+}
+.cr-open-box {
+  width: min(520px, 100%); max-height: 70vh; display: flex; flex-direction: column;
+  background: var(--panel); border: 1px solid var(--edge-soft); border-radius: 8px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.7); overflow: hidden;
+}
+.cr-open-box header {
+  display: flex; align-items: center; gap: 8px; padding: 11px 14px;
+  border-bottom: 1px solid var(--edge); background: var(--head); box-shadow: var(--lift);
+}
+.cr-open-box header .sp { flex: 1; }
+.cr-open-box header button { color: var(--t2); padding: 2px 6px; border-radius: 4px; }
+.cr-open-box header button:hover { color: var(--t1); background: var(--panel-2); }
+.cr-open-box .none { padding: 24px 16px; color: var(--t3); font-size: 12.5px; }
+.cr-open-box ol { list-style: none; margin: 0; padding: 6px; overflow-y: auto; }
+.cr-open-box li button {
+  display: flex; flex-direction: column; gap: 2px; width: 100%;
+  padding: 8px 10px; border-radius: 4px; text-align: left;
+}
+.cr-open-box .nm { color: var(--t1); font-size: 13px; }
+.cr-open-box .meta { color: var(--t3); font-size: 11px; font-family: var(--mono); }
+.cr-open-row {
+  display: flex; align-items: center; gap: 8px; padding: 4px 6px;
+  border-radius: 4px; border: 1px solid transparent;
+}
+.cr-open-row:hover { background: var(--panel-2); border-color: var(--edge-soft); }
+.cr-open-main {
+  display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0;
+  padding: 4px; text-align: left; background: none; border: 0; cursor: pointer;
+}
+.cr-open-actions {
+  display: flex; align-items: center; gap: 4px; opacity: 0.7;
+}
+.cr-open-row:hover .cr-open-actions { opacity: 1; }
+.cr-open-act {
+  background: var(--panel); border: 1px solid var(--edge-soft);
+  color: var(--t2); border-radius: 4px; padding: 3px 7px;
+  font-size: 11px; font-family: var(--ui); cursor: pointer;
+}
+.cr-open-act:hover { color: var(--t1); border-color: var(--t3); background: var(--panel-2); }
+.cr-open-act.del:hover { color: var(--red); border-color: var(--red); }
+.cr-rev-cur {
+  font-family: var(--mono); font-size: 10.5px; color: var(--green);
+  padding: 2px 6px; border-radius: 3px; background: rgba(46, 204, 113, 0.12);
+}
+
+/* A pool thumbnail is the media's own first frame, or nothing. */
+.cr-th { position: relative; overflow: hidden; }
+.cr-th img {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: cover; display: block;
+}
+.cr-th .cr-dur { position: relative; z-index: 1; }
+
+/* A clip with no extracted frames is a plain slab, not a painting. */
+.cr-clip-frames { position: absolute; inset: 0; display: flex; overflow: hidden; pointer-events: none; }
+.cr-clip-frames img { height: 100%; flex: none; object-fit: cover; display: block; opacity: 0.92; }
+
+/* ── confirm: removing a file takes its clips with it ─────── */
+.cr-confirm { width: min(440px, 100%); }
+.cr-cbody { padding: 14px 16px 4px; overflow-y: auto; }
+.cr-cbody p { margin: 0 0 10px; font-size: 12.5px; color: var(--t1); line-height: 1.5; }
+.cr-cnote { color: var(--t3) !important; font-size: 11.5px !important; }
+.cr-cwhat { list-style: none; margin: 0 0 12px; padding: 0; border: 1px solid var(--edge); border-radius: 4px; }
+.cr-cwhat li {
+  display: flex; align-items: baseline; gap: 8px; padding: 5px 9px; font-size: 11.5px;
+}
+.cr-cwhat li + li { border-top: 1px solid var(--edge); }
+.cr-cwhat .nm { color: var(--t1); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cr-cwhat .meta { font-family: var(--mono); font-size: 10px; color: var(--t3); flex: none; }
+.cr-cwhat .more { color: var(--t3); font-style: italic; }
+.cr-cfoot {
+  display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px;
+  border-top: 1px solid var(--edge); background: var(--head);
+}
+.cr-cbtn {
+  padding: 5px 12px; border-radius: 4px; font-size: 12px; font-family: var(--ui);
+  border: 1px solid var(--edge-soft); background: var(--panel-2); color: var(--t1); cursor: pointer;
+}
+.cr-cbtn:hover { border-color: var(--t3); }
+.cr-cgo { background: var(--red); border-color: var(--red); color: var(--on-accent); }
+.cr-cgo:hover { filter: brightness(1.1); border-color: var(--red); }
+
+/* -- clip context menu -- */
+.cr-ctx {
+  position: fixed; z-index: 130;
+  min-width: 180px; padding: 4px;
+  background: var(--panel); border: 1px solid var(--edge-soft);
+  border-radius: 6px; box-shadow: var(--lift), 0 14px 40px rgba(0, 0, 0, 0.7);
+  animation: ctx-in 0.12s ease-out;
+}
+@keyframes ctx-in {
+  from { opacity: 0; transform: scale(0.96); }
+  to { opacity: 1; transform: scale(1); }
+}
+.cr-ctx-item {
+  display: flex; align-items: center; gap: 6px;
+  width: 100%; padding: 5px 8px; border-radius: 4px;
+  color: var(--t1); text-align: left; line-height: 1.4; font-size: 12px;
+  background: none; border: 0; cursor: pointer; font-family: var(--ui);
+}
+.cr-ctx-item:hover { background: var(--orange); color: #fff; }
+.cr-ctx-item:hover .hint { color: rgba(255, 255, 255, 0.72); }
+.cr-ctx-item.off { color: var(--t3); cursor: default; }
+.cr-ctx-item.off:hover { background: transparent; color: var(--t3); }
+.cr-ctx-item .hint {
+  flex: none; margin-left: auto;
+  font-family: var(--mono); font-size: 10.5px; color: var(--t3);
+}
+.cr-ctx-sep {
+  height: 1px; margin: 4px 0;
+  background: var(--edge);
+}
+
+/* ── a caption on the timeline ────────────────────────────── */
+.cr-cap {
+  display: flex; align-items: center; overflow: hidden;
+  padding: 0 5px; border-radius: 3px; cursor: pointer; text-align: left;
+  font-family: var(--ui);
+  background: linear-gradient(180deg, var(--clip-s), var(--clip-s-bar));
+  border: 1px solid var(--edge-soft);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 8%, transparent);
+}
+.cr-cap span {
+  font-size: 10px; color: var(--t1); line-height: 1.1;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cr-cap[data-selected] { border-color: var(--orange); box-shadow: 0 0 0 1px var(--orange); }
+.cr-cap[data-off] { opacity: 0.45; }
+.cr-cap[data-off] span { text-decoration: line-through; }
