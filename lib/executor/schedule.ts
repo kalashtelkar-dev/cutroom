@@ -118,42 +118,67 @@ export interface StepFacts {
  * later catalogue from giving one engine nodes of both kinds. A node we have
  * no entry for is `any` rather than a guess, which lets it run anywhere.
  */
+/**
+ * What a step is called on screen.
+ *
+ * A step's label is READ BY A PERSON, and it used to be `whisperx/subtitle`,
+ * `vllm/translate`, `pipeline tpl_cdvkzzJeZylk`. Which engine does the work,
+ * which operation of it, and under which saved id, are ours and not the
+ * user's: a run card naming them tells somebody watching a progress bar which
+ * models this is built on, which is not theirs to be handed.
+ *
+ * So a step says what it is doing, in the card that says what it does, and
+ * the fallback here is deliberately generic rather than descriptive. A card
+ * that forgets a label loses detail; it does not leak the stack. `engine` is
+ * untouched, because that is the capacity key and never reaches the screen.
+ */
+const GENERIC: Record<string, string> = {
+  operation: 'Working',
+  pipeline: 'Working',
+  graph: 'Working',
+  'timeline-op': 'Editing the timeline',
+  'read-json': 'Reading the result',
+  fanout: 'For each item',
+  branch: 'Choosing what to do',
+};
+
+const labelOf = (step: Step): string => {
+  const own = (step as { label?: unknown }).label;
+  return typeof own === 'string' && own.trim() ? own.trim() : (GENERIC[step.kind] ?? 'Working');
+};
+
 export function describeStep(step: Step): StepFacts {
   const rung = actualRung([step]);
+  const label = labelOf(step);
   switch (step.kind) {
     case 'operation': {
       const engine = String(step.engine ?? 'unknown');
-      const key = `${engine}/${String(step.operation ?? '')}`;
-      const node = getNode(key);
-      return { engine, tier: node ? (node.gpu ? 'gpu' : 'cpu') : 'any', label: key, rung };
+      const node = getNode(`${engine}/${String(step.operation ?? '')}`);
+      return { engine, tier: node ? (node.gpu ? 'gpu' : 'cpu') : 'any', label, rung };
     }
     case 'pipeline':
-      return { engine: 'pipeline', tier: 'any', label: `pipeline ${String(step.pipelineId ?? '?')}`, rung };
+      return { engine: 'pipeline', tier: 'any', label, rung };
     case 'graph':
-      return { engine: 'graph', tier: 'any', label: 'ad-hoc graph', rung };
+      return { engine: 'graph', tier: 'any', label, rung };
     case 'timeline-op':
-      return { engine: LOCAL_ENGINE, tier: 'any', label: `timeline ${String(step.op ?? '?')}`, rung };
+      return { engine: LOCAL_ENGINE, tier: 'any', label, rung };
     case 'read-json':
-      return {
-        engine: LOCAL_ENGINE,
-        tier: 'any',
-        label: `read ${String((step as { pick?: unknown }).pick ?? 'output')}`,
-        rung,
-      };
+      return { engine: LOCAL_ENGINE, tier: 'any', label, rung };
     case 'fanout': {
       const n = Number(step.maxParallel);
       return {
         engine: LOCAL_ENGINE,
         tier: 'any',
-        label: `for each ${String(step.over ?? 'item')}`,
+        label,
         rung,
         ...(Number.isFinite(n) && n >= 1 ? { maxParallel: Math.floor(n) } : {}),
       };
     }
     case 'branch':
-      return { engine: LOCAL_ENGINE, tier: 'any', label: `branch on ${String(step.when ?? step.cond ?? '?')}`, rung };
+      // never `branch on $rewrite`: a binding name is a name out of the card
+      return { engine: LOCAL_ENGINE, tier: 'any', label, rung };
     default:
-      return { engine: LOCAL_ENGINE, tier: 'any', label: String(step.kind), rung };
+      return { engine: LOCAL_ENGINE, tier: 'any', label, rung };
   }
 }
 

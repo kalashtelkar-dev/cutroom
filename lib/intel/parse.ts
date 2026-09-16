@@ -1,7 +1,17 @@
 import type { Card, CardMeta, Step } from './types.ts';
+import { parseOptions } from './options.ts';
 
+/**
+ * One `##` section, up to the next one of the SAME level.
+ *
+ * `(?=\n##)` was the stop, and it stops at `###` too, because `###` starts
+ * with `##`. Every section here was flat until `## Options` grew a `###` per
+ * question, and the section then ended at the first one: the options parsed
+ * as nothing, the assistant asked nothing, and the run went with the
+ * defaults without a word. `[^#]` is the whole fix.
+ */
 const section = (body: string, name: string): string => {
-  const m = body.match(new RegExp(`##\\s*${name}\\s*\\n([\\s\\S]*?)(?=\\n##|$)`, 'i'));
+  const m = body.match(new RegExp(`##\\s*${name}\\s*\\n([\\s\\S]*?)(?=\\n##[^#]|$)`, 'i'));
   return m ? m[1].trim() : '';
 };
 
@@ -71,6 +81,7 @@ export function parseCard(md: string, fallbackId = ''): Card {
     whenNotToUse: section(body, 'When NOT to use it'),
     prose,
     steps,
+    questions: parseOptions(section(body, 'Options')),
   };
 }
 

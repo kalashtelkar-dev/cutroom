@@ -270,35 +270,78 @@ function readPath(root: unknown, path: string): unknown {
 }
 
 /**
+ * A binding the plan can do without: `$name?`.
+ *
+ * Most params are required and an unbound one is a mistake worth reporting.
+ * A few are genuinely optional, and the two cases want opposite treatment.
+ * `whisperx/subtitle` takes a `language`, and OMITTING it means "detect the
+ * language", which is a real and often correct answer. Sending the literal
+ * `"$spoken"` instead is a two-character ISO code that is neither, and the
+ * schema refuses it; sending `null` is a present-but-empty param, which the
+ * server reads as an answer rather than as the absence of one.
+ *
+ * So a trailing `?` says the plan means it: bound, the value is used; unbound,
+ * the key does not appear in the request at all. It is spelled in the card so
+ * a reader can see which params are the editor's choice and which are the
+ * user's.
+ */
+const OPTIONAL = /^\$[A-Za-z_][\w.]*\?$/;
+
+/** What an unset `$name?` resolves to. Dropped from whatever object holds it. */
+export const OMIT = Symbol('omit');
+
+/**
  * Replace `$name` and `$name.field` with what earlier steps produced.
  *
  * An unbound reference is left as the literal `$name` rather than becoming
  * `undefined`: the server's error then names the binding, and the repair
  * loop has something to fix. A silent `undefined` reads as "the param was
- * omitted", which sends the repair loop after the wrong thing.
+ * omitted", which sends the repair loop after the wrong thing. `$name?` is
+ * the exception, and it is an exception the card had to ask for.
  */
 export function resolveBindings(value: unknown, bindings: Record<string, unknown>): unknown {
   if (typeof value === 'string') {
     if (!value.startsWith('$') || value.length < 2) return value;
-    const path = value.slice(1);
+    const optional = OPTIONAL.test(value);
+    const path = value.slice(1, optional ? -1 : undefined);
     const head = path.split('.')[0];
-    return head in bindings ? readPath(bindings, path) : value;
+    if (head in bindings) {
+      const found = readPath(bindings, path);
+      // `$spoken?` answered with nothing is still nothing: a question the
+      // user skipped must not become a param holding undefined.
+      return optional && (found === undefined || found === null || found === '') ? OMIT : found;
+    }
+    return optional ? OMIT : value;
   }
-  if (Array.isArray(value)) return value.map((v) => resolveBindings(v, bindings));
+  if (Array.isArray(value)) {
+    return value.map((v) => resolveBindings(v, bindings)).filter((v) => v !== OMIT);
+  }
   if (value && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, resolveBindings(v, bindings)]),
-    );
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      const resolved = resolveBindings(v, bindings);
+      if (resolved !== OMIT) out[k] = resolved;
+    }
+    return out;
   }
   return value;
 }
 
+/**
+ * Exactly what this step posts, and nothing else.
+ *
+ * It used to be the params with `pipelineId`, `graph`, `target` and `from`
+ * merged in beside them, and the transport then filtered those names back out
+ * before sending. That works until a real param is called one of them:
+ * `vllm/translate` takes a required `target`, which the filter would have
+ * stripped on its way out, and the job would have failed asking for the very
+ * thing the card supplied. A step's own fields are on the step, the transport
+ * is handed the step, so they never need to travel through the body.
+ */
 function stepInput(step: Step, bindings: Record<string, unknown>): Record<string, unknown> {
-  const merged: Record<string, unknown> = { ...((step.params ?? {}) as Record<string, unknown>) };
-  for (const k of ['input', 'pipelineId', 'graph', 'target', 'from'] as const) {
-    if (step[k] !== undefined) merged[k] = step[k];
-  }
-  return resolveBindings(merged, bindings) as Record<string, unknown>;
+  const params: Record<string, unknown> = { ...((step.params ?? {}) as Record<string, unknown>) };
+  if (step.input !== undefined) params.input = step.input;
+  return resolveBindings(params, bindings) as Record<string, unknown>;
 }
 
 // ── defaults ────────────────────────────────────────────────────────────
@@ -605,12 +648,20 @@ export function createExecutor(deps: ExecutorDeps): Executor {
            * a clip id where the footage belonged. Both reached the API and
            * came back `input_unreachable`, which is a true answer to the
            * wrong question.
+           *
+           * It checks the BODY, not the bindings. Checking `bound` instead
+           * was a false refusal with a real error message: the shell seeds
+           * `selection` with the selected clip's id, no plan had ever asked
+           * for it, and every subtitle run died before it started saying
+           * "selection: clp_tevzon7u is an id inside the document". The
+           * advice was sound and the key was not in the request.
            */
+          const body = stepInput(s.step, bound);
           {
             const problems = s.step.kind === 'pipeline'
-              ? checkRunBody(bound)
+              ? checkRunBody(body)
               : s.step.kind === 'operation'
-                ? checkOperationInput(String(s.step.engine ?? ''), String(s.step.operation ?? ''), bound)
+                ? checkOperationInput(String(s.step.engine ?? ''), String(s.step.operation ?? ''), body)
                 : [];
             if (problems.length) throw new PlanError(describeProblems(problems));
           }
@@ -620,7 +671,7 @@ export function createExecutor(deps: ExecutorDeps): Executor {
               transport.startRun({
                 stepId: s.id,
                 step: s.step,
-                input: stepInput(s.step, bound),
+                input: body,
                 tier,
                 attempt,
                 idempotencyKey: `${runId}:${s.id}:${attempt}`,

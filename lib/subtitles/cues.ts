@@ -123,3 +123,42 @@ export function cuesInOutput(
   }
   return [];
 }
+
+/**
+ * A translation, put back on the timings the ALIGNER produced.
+ *
+ * `vllm/translate` is asked for a transcript in another language and answers
+ * with `segments` of its own. Its start and end are not the ones it was
+ * given, and three runs over the same seven seconds measured three different
+ * behaviours:
+ *
+ *   - one cue in, one cue out, on the same boundaries;
+ *   - one 6.6s cue in, THREE out, dividing the span between them;
+ *   - four aligned cues in, ONE out, spanning the lot, ending a frame early.
+ *
+ * The third is the one that matters. Merging four cues into one puts a single
+ * caption on screen for the length of the clip, which is the exact defect
+ * `whisperx/translate` was rejected for. Naming the behaviour in `system`
+ * fixes it (measured: four in, four out, boundaries identical, in both of two
+ * target languages and at two batch sizes), and this is the belt to that
+ * brace: when the counts line up, the timings come off the aligner, which
+ * measured them against the audio, rather than off a language model, which
+ * did not.
+ *
+ * When the counts do NOT line up the model's own spans are kept, because a
+ * translation split across three lines is a real answer and forcing it onto
+ * one cue would throw two thirds of it away. The caller is told which
+ * happened, because "your subtitles are on the model's guess at the timing"
+ * is worth being able to say.
+ */
+export function retimeTranslation(
+  aligned: readonly Cue[],
+  translated: readonly Cue[],
+): { cues: Cue[]; retimed: boolean } {
+  if (!translated.length) return { cues: [], retimed: false };
+  if (aligned.length !== translated.length) return { cues: [...translated], retimed: false };
+  return {
+    cues: aligned.map((cue, i) => ({ ...cue, text: translated[i].text })),
+    retimed: true,
+  };
+}

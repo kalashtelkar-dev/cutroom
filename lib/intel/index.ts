@@ -2,7 +2,11 @@ import { parseCard } from './parse.ts';
 import { CARD_SOURCE, CARD_IDS, type CardId } from './cards.generated.ts';
 import type { Card } from './types.ts';
 
-export type { Card, Step, CardMeta } from './types.ts';
+export type { Card, Step, CardMeta, Question, Choice, Answer } from './types.ts';
+export {
+  answersInPrompt, answerByLabel, bindingsFrom, bindingsSet,
+  defaultAnswer, pendingQuestions, parseOptions, withAssumed,
+} from './options.ts';
 export { parseCard, blurb } from './parse.ts';
 export { CARD_IDS, type CardId } from './cards.generated.ts';
 

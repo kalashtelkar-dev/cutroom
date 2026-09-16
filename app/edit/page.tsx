@@ -52,7 +52,12 @@ import { resolveToolSource, isRefusal } from '@/lib/tools/source.ts';
 import type { RunState, ExecutorEvent } from '@/lib/executor/types.ts';
 import type { Plan } from '@/lib/router/plan.ts';
 import { toolTier } from '@/components/rail/tools.ts';
-import { getCard } from '@/lib/intel/index.ts';
+import { answerByLabel, bindingsFrom, getCard } from '@/lib/intel/index.ts';
+import type { Card, Step } from '@/lib/intel/index.ts';
+import { filePorts } from '@/lib/executor/bindingCheck.ts';
+import { languageName } from '@/lib/subtitles/languages.ts';
+import { retimeTranslation } from '@/lib/subtitles/cues.ts';
+import type { Cue } from '@/lib/subtitles/srt.ts';
 
 /**
  * The editor.
@@ -73,6 +78,33 @@ import { getCard } from '@/lib/intel/index.ts';
  * enough that two deliberate nudges stay two undos.
  */
 const COALESCE_MS = 700;
+
+/**
+ * What a finished subtitle run actually did, in a sentence.
+ *
+ * "Plan completed" is not an answer to "put subtitles on this". The three
+ * things worth saying are how many cues landed, what language they are in, and
+ * whether the run is sure about that, because a confident transcription of the
+ * wrong language is the failure this tool has actually had: the pipeline it
+ * replaced turned Hindi speech into English text and reported success.
+ *
+ * `language` means two different things depending on which job answered, and
+ * both are the right thing to print: whisperx says what it HEARD, and
+ * vllm/translate says what it was asked to WRITE, which is the one the user
+ * chose when there was a translation.
+ */
+function describeCaptions(count: number, output: Record<string, unknown>): string {
+  const cues = `${count} caption${count === 1 ? '' : 's'} on the timeline`;
+  const code = typeof output.language === 'string' ? output.language : '';
+  const said = code ? `${cues}, in ${languageName(code)}` : cues;
+
+  const sure = output.languageProbability;
+  if (typeof sure === 'number' && sure < 0.6) {
+    return `${said}. It was only ${Math.round(sure * 100)}% sure that is the language, `
+      + 'so say which it is and run it again if the words look wrong.';
+  }
+  return said;
+}
 
 export default function EditorPage() {
   /**
@@ -995,11 +1027,51 @@ export default function EditorPage() {
    */
   const placePlanResult = useCallback(async (
     runIds: string[],
+    jobIds: string[],
     extra: Record<string, unknown>,
     title: string,
   ): Promise<string | null> => {
     const mediaKey = typeof extra.sourceMediaKey === 'string' ? extra.sourceMediaKey : null;
-    if (!runIds.length || !mediaKey) return null;
+    if (!mediaKey) return null;
+
+    /**
+     * Everything that might be holding the answer, best first.
+     *
+     * Operations come before pipelines and the LAST operation comes before
+     * the first: a transcription and a translation both answer with
+     * `segments`, and taking the earlier one would put the original language
+     * on the timeline after paying to translate it.
+     */
+    const sources: { id: string; at: string }[] = [
+      ...[...jobIds].reverse().map((id) => ({ id, at: `/api/jobs/${encodeURIComponent(id)}` })),
+      ...runIds.map((id) => ({ id, at: `/api/runs/${encodeURIComponent(id)}` })),
+    ];
+    if (!sources.length) return null;
+
+    /**
+     * The step BEFORE the one that answered, when there was one.
+     *
+     * A translation is the second of two steps and both answer with cues.
+     * Reading only the last leaves the timings to a language model, which
+     * measured nothing: three runs over the same clip merged four cues into
+     * one, split one into three, and once came back with none at all. The
+     * step before it is the aligner, which measured them against the audio,
+     * so its cues are the ones the words go on. `retimeTranslation` decides
+     * whether they line up well enough to do that.
+     */
+    const earlier = async (after: string): Promise<Cue[]> => {
+      const at = sources.findIndex((s) => s.id === after);
+      for (const s of sources.slice(at + 1)) {
+        try {
+          const res = await fetch(s.at);
+          const body = await res.json().catch(() => null);
+          if (!res.ok || !body) continue;
+          const found = cuesInOutput((body.output ?? body.result ?? null) as Record<string, unknown>, doc.rate);
+          if (found.length) return found;
+        } catch { /* one fewer thing to compare against, not a failure */ }
+      }
+      return [];
+    };
 
     /** The clip a pipeline read, which is the only thing that can place its times. */
     const clipForMedia = (key: string) => doc.tracks
@@ -1007,13 +1079,14 @@ export default function EditorPage() {
       .flatMap((t) => placeTrack(t).map((pl) => ({ ...pl, trackId: t.id })))
       .find((pl) => isClip(pl.item) && pl.item.mediaKey === key) ?? null;
 
-    for (const runId of runIds) {
+    for (const { id: runId, at } of sources) {
       let output: Record<string, unknown> | null = null;
       try {
-        const res = await fetch(`/api/runs/${encodeURIComponent(runId)}`);
+        const res = await fetch(at);
         const body = await res.json().catch(() => null);
         if (!res.ok || !body) continue;
-        output = (body.output ?? null) as Record<string, unknown> | null;
+        // a pipeline puts its answer under `output`, a job under `result`
+        output = (body.output ?? body.result ?? null) as Record<string, unknown> | null;
       } catch {
         continue;   // the run finished; not being able to re-read it is not a failure of the run
       }
@@ -1038,7 +1111,37 @@ export default function EditorPage() {
        * one. The file stays as the fallback, for an imported SRT and for a
        * pipeline that returns nothing else.
        */
-      const cues = cuesInOutput(output, doc.rate);
+      let cues = cuesInOutput(output, doc.rate);
+      let onModelTiming = false;
+
+      /**
+       * A translation that came back empty is not a reason to place the
+       * original.
+       *
+       * The loop below falls through to the next source when this one has no
+       * cues, and the next source is the transcription. Left alone, a
+       * translation that answered with nothing would quietly put the language
+       * that was spoken on a timeline that asked for another one, and report
+       * success. It has done exactly that once, on a run with no `system`
+       * prompt to hold it to the segments it was given.
+       */
+      if (!cues.length && runId !== sources[sources.length - 1].id) {
+        const before = await earlier(runId);
+        if (before.length) {
+          return `${title}: the translation came back empty, so nothing was placed. `
+            + 'Try it again, or ask for the language that is spoken.';
+        }
+      }
+
+      if (cues.length && extra.rewrite) {
+        const aligned = await earlier(runId);
+        if (aligned.length) {
+          const put = retimeTranslation(aligned, cues);
+          cues = put.cues;
+          onModelTiming = !put.retimed;
+        }
+      }
+
       const srtKey = cues.length ? null : subtitleKeyOf(output);
 
       // A run that transcribed silence is a real answer, and "completed" over
@@ -1074,7 +1177,11 @@ export default function EditorPage() {
 
           if (!count) return `${title}: no speech was found, so there is nothing to caption`;
           commit(ops, `${title}: ${count} caption${count === 1 ? '' : 's'}`);
-          return `${title}: ${count} caption${count === 1 ? '' : 's'} on the timeline`;
+          const said = `${title}: ${describeCaptions(count, output)}`;
+          return onModelTiming
+            ? `${said}. The translation came back as a different number of lines, `
+              + 'so these sit where it put them rather than on the measured speech.'
+            : said;
         } catch (e) {
           return `${title}: the subtitles were made and could not be placed: ${(e as Error).message}`;
         }
@@ -1099,12 +1206,28 @@ export default function EditorPage() {
      * server knows it by.
      */
     const pipelineRuns: string[] = [];
+    /**
+     * The operation jobs, in the order they started.
+     *
+     * An operation's answer is on the job and not in the folded run: the
+     * executor's `job.done` carries outputs, and whisperx's cues are not an
+     * output, they are the `segments` field of the result. A pipeline had the
+     * same problem and the same cure, the only difference being the endpoint:
+     * an operation is a JOB at /v1/jobs/{id}, a pipeline is a RUN at
+     * /v1/runs/{id}, and asking the wrong one answers 404.
+     *
+     * Reverse order matters. A translated run is `whisperx/subtitle` then
+     * `vllm/translate`, both answering with `segments`, and the LAST one is
+     * the one the user asked for.
+     */
+    const operationJobs: string[] = [];
 
     const exec = createExecutor({
       transport,
       emit: (event: ExecutorEvent) => {
-        if (event.type === 'job.queued' && event.engine === 'pipeline') {
-          if (!pipelineRuns.includes(event.jobId)) pipelineRuns.push(event.jobId);
+        if (event.type === 'job.queued') {
+          const into = event.engine === 'pipeline' ? pipelineRuns : operationJobs;
+          if (!into.includes(event.jobId)) into.push(event.jobId);
         }
         setRuns((prev) => {
           const runId = event.runId;
@@ -1187,7 +1310,7 @@ export default function EditorPage() {
             commit(recOps, `Apply ${plan.cardId}`);
           }
         }
-        const said = await placePlanResult(pipelineRuns, extra, title);
+        const said = await placePlanResult(pipelineRuns, operationJobs, extra, title);
         note(said ?? `Plan completed: ${title}`);
       } else if (result.status === 'failed') {
         /**
@@ -1244,6 +1367,153 @@ export default function EditorPage() {
   }, []);
 
   /**
+   * Does anything in this plan open a file?
+   *
+   * A pipeline always does; an operation does when the node has a port that
+   * accepts one, which the catalogue knows and nothing here should guess at.
+   * `filePorts` is the same answer the executor's own pre-flight check uses,
+   * so a step cannot be told it needs footage by one and not by the other.
+   */
+  const needsFootage = useCallback((steps: readonly Step[]): boolean => {
+    const walk = (list: readonly Step[]): boolean => list.some((step) => {
+      if (step.kind === 'pipeline') return true;
+      if (step.kind === 'operation') {
+        return filePorts(String(step.engine ?? ''), String(step.operation ?? '')).length > 0;
+      }
+      for (const side of ['body', 'then', 'else'] as const) {
+        if (Array.isArray(step[side]) && walk(step[side] as Step[])) return true;
+      }
+      return false;
+    });
+    return walk(steps);
+  }, []);
+
+  /**
+   * The footage a run is pointed at, checked before it is paid for.
+   *
+   * A document outlives its bytes, and a key that has been swept looks
+   * exactly like one that has not until something opens it. Finding that out
+   * from a pipeline costs minutes of GPU and reports "the job failed";
+   * finding it out here costs a few seconds of cpu and can name the file. The
+   * proxy and the original are two keys for the same footage and they expire
+   * separately, so a gone proxy is not a gone clip: try the other before
+   * giving up.
+   */
+  const resolveSource = useCallback(async (
+    label: string,
+    target: string,
+  ): Promise<{ source: string; sourceMediaKey: string } | { error: string }> => {
+    const source = resolveToolSource(doc, selectedPlaced, target);
+    if (isRefusal(source)) return { error: source.error };
+
+    note(`${label}: checking "${source.name}"`);
+    const candidates = [source.key, source.fallbackKey].filter((k): k is string => !!k);
+    let usable: string | null = null;
+    let why = 'that file is not in storage any more';
+    for (const key of candidates) {
+      const verdict = await checkMedia(key);
+      if (verdict.reachable !== false) { usable = key; break; }  // null means unknown, so try it
+      why = verdict.reason ?? why;
+    }
+    if (!usable) {
+      return { error: `"${source.name}" cannot be read, ${why}. Import it again to run this.` };
+    }
+    return { source: usable, sourceMediaKey: source.mediaKey };
+  }, [doc, selectedPlaced, note, checkMedia]);
+
+  /**
+   * The vLLM connection, when the answers asked for something that needs one.
+   *
+   * Asked BEFORE the run rather than during it. A translation is the second
+   * step of two, so a missing connection would surface after the
+   * transcription had already been paid for, as a job that failed with "no
+   * connection named ..." and a subtitle track that never appeared. The name
+   * is a label in the dashboard, not a credential, and it is read through a
+   * route because the env var is server-side like everything else here.
+   */
+  const connectionFor = useCallback(async (
+    bindings: Record<string, unknown>,
+    label: string,
+  ): Promise<{ vllmConnection?: { use: string } } | { error: string }> => {
+    if (!bindings.rewrite) return {};
+    try {
+      const res = await fetch('/api/config/translation');
+      const body = await res.json().catch(() => null);
+      const name = res.ok && typeof body?.connection === 'string' ? body.connection : null;
+      if (!name) {
+        const into = typeof bindings.target === 'string' ? ` into ${bindings.target}` : '';
+        return {
+          error: `${label}: subtitles${into} need a vLLM connection, and none is configured. `
+            + 'Add one under Connections in the AISuite dashboard and put its name in '
+            + 'VLLM_CONNECTION. Subtitles in the language spoken need nothing.',
+        };
+      }
+      return { vllmConnection: { use: name } };
+    } catch (e) {
+      return { error: `${label}: could not tell whether translation is configured, ${(e as Error).message}` };
+    }
+  }, []);
+
+  /**
+   * A rail dropdown's answers as bindings.
+   *
+   * The rail offers a card's own questions, so the label the user picked is a
+   * label the card lists, and the card is what says what it means.
+   */
+  const paramBindings = useCallback((
+    card: Card,
+    params: Record<string, string>,
+  ): Record<string, unknown> => {
+    const answers = Object.entries(params)
+      .map(([id, label]) => {
+        const q = card.questions.find((x) => x.id === id);
+        return q ? answerByLabel(q, label) : null;
+      })
+      .filter((a): a is NonNullable<typeof a> => a !== null);
+    return bindingsFrom(answers);
+  }, []);
+
+  /**
+   * A plan the assistant settled, with everything it needs to actually run.
+   *
+   * This is the half that was missing, and it is why "put subtitles" failed
+   * however the plan was fixed. The rail resolved the tool's target to an
+   * object key before it ran anything; the assistant called `executePlan`
+   * with no extras at all, so `$source` was bound by nothing and the card's
+   * key reached the API as the literal text "$source".
+   *
+   * The assistant has no "run on" dropdown, so the target is the selection
+   * when there is one and the timeline when there is not. That is the same
+   * rule the rail's own default follows, and `resolveToolSource` still
+   * refuses a timeline cutting between several files rather than picking one:
+   * analysing footage nobody pointed at is not a fallback, it is a guess with
+   * a bill attached.
+   */
+  const runRoutedPlan = useCallback(async (
+    plan: Plan,
+    bindings: Record<string, string | boolean>,
+  ) => {
+    if (busy) return;
+    const label = plan.intent || plan.cardId;
+    let extra: Record<string, unknown> = { ...bindings };
+
+    // the free local check first: a missing connection should not be found
+    // out after a transcription has already been paid for
+    const connection = await connectionFor(extra, label);
+    if ('error' in connection) { note(connection.error); return; }
+    extra = { ...extra, ...connection };
+
+    if (needsFootage(plan.steps)) {
+      const target = selectedPlaced && isClip(selectedPlaced.item) ? 'Selected clip' : 'Whole timeline';
+      const ready = await resolveSource(label, target);
+      if ('error' in ready) { note(`${label}: ${ready.error}`); return; }
+      extra = { ...extra, ...ready };
+    }
+
+    void executePlan(plan, extra);
+  }, [busy, note, connectionFor, needsFootage, resolveSource, selectedPlaced, executePlan]);
+
+  /**
    * A tool above rung 1.
    *
    * Rung 2 cards are a single operation. Rung 3 and above run a published
@@ -1287,39 +1557,23 @@ export default function EditorPage() {
     }
 
     let extra: Record<string, unknown> = {};
-    if (pipelineStep) {
-      const source = resolveToolSource(doc, selectedPlaced, args?.target ?? '');
-      if (isRefusal(source)) {
-        note(`${tool.name}: ${source.error}`);
-        return;
-      }
-
-      /**
-       * Read the file before paying to read it properly.
-       *
-       * A document outlives its bytes, and a key that has been swept looks
-       * exactly like one that has not until something opens it. Finding that
-       * out from a pipeline costs minutes of GPU and reports "the job
-       * failed"; finding it out here costs a few seconds of cpu and can name
-       * the file. The proxy and the original are two keys for the same
-       * footage and they expire separately, so a gone proxy is not a gone
-       * clip: try the other before giving up.
-       */
-      note(`${tool.name}: checking "${source.name}"`);
-      const candidates = [source.key, source.fallbackKey].filter((k): k is string => !!k);
-      let usable: string | null = null;
-      let why = 'that file is not in storage any more';
-      for (const key of candidates) {
-        const verdict = await checkMedia(key);
-        if (verdict.reachable !== false) { usable = key; break; }  // null means unknown, so try it
-        why = verdict.reason ?? why;
-      }
-      if (!usable) {
-        note(`${tool.name}: "${source.name}" cannot be read, ${why}. Import it again to run this.`);
-        return;
-      }
-      extra = { source: usable, sourceMediaKey: source.mediaKey };
+    if (needsFootage(card.steps)) {
+      const ready = await resolveSource(tool.name, args?.target ?? '');
+      if ('error' in ready) { note(`${tool.name}: ${ready.error}`); return; }
+      extra = ready;
     }
+    /**
+     * The params the arm card offered, which used to reach nothing.
+     *
+     * `runTool` read `args.target` and stopped, so Style and Language were two
+     * dropdowns that changed the run in no way at all. They are the card's own
+     * questions now, and their answers are bindings the plan reads, so they
+     * have to travel with the rest.
+     */
+    extra = { ...extra, ...paramBindings(card, args?.params ?? {}) };
+    const connection = await connectionFor(extra, tool.name);
+    if ('error' in connection) { note(connection.error); return; }
+    extra = { ...extra, ...connection };
 
     void executePlan({
       cardId: card.id,
@@ -1378,13 +1632,14 @@ export default function EditorPage() {
         onNavigateProjects={navigateToProjects}
         onRunLocalTool={runLocalTool}
         onRunTool={runTool}
-        onRunPlan={executePlan}
+        onRunPlan={runRoutedPlan}
         onUndo={() => step('undo')}
         onRedo={() => step('redo')}
         undoLabel={stack.undo[0] ?? null}
         redoLabel={stack.redo[0] ?? null}
         historyDepth={{ undo: stack.undo.length, redo: stack.redo.length }}
         onNotify={note}
+        notice={toast}
         onOpenWorkbench={() => setBenchOpen(true)}
         // the same three things the File menu and the keys do, so there is
         // one implementation of each and the button cannot drift from Cmd+E

@@ -63,7 +63,7 @@ export interface ShellProps {
   onRunTool?: (tool: Tool, args: ToolRunArgs) => void;
   onRouted?: (prompt: string, reply: RouteReply) => void;
   /** Execute a plan from the assistant. */
-  onRunPlan?: (plan: Plan) => void;
+  onRunPlan?: (plan: Plan, bindings: Record<string, string | boolean>) => void;
   /** A file picked in the pool. It loads in Source either way; this is notice. */
   onSelectMedia?: (key: string) => void;
   /**
@@ -111,6 +111,8 @@ export interface ShellProps {
    * the shell keeps its own, which is what makes it usable on its own.
    */
   onNotify?: (message: string) => void;
+  /** The shell's latest word, kept in the assistant log rather than flashed. */
+  notice?: { id: number; text: string } | null;
   /** The timeline panel. */
   children?: ReactNode;
 }
@@ -157,6 +159,7 @@ export function Shell({
   onOpenJobs,
   saveState,
   onNotify,
+  notice = null,
   children,
 }: ShellProps) {
   /**
@@ -476,6 +479,7 @@ export function Shell({
                       onArmedCancel={() => setArmed(null)}
                       onRouted={onRouted}
                       onRunPlan={onRunPlan}
+                      notice={notice}
                     />
                   ) : (
                     <MediaPool

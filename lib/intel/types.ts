@@ -33,6 +33,9 @@ export interface Step {
   [key: string]: unknown;
 }
 
+import type { Question } from './options.ts';
+export type { Question, Choice, Answer, FreeKind } from './options.ts';
+
 /** Frontmatter, as authored. Everything is a string in the file. */
 export interface CardMeta {
   id: string;
@@ -84,4 +87,12 @@ export interface Card {
   prose: string;
   /** The typed plan from the card's ```json fence. */
   steps: Step[];
+  /**
+   * What the card asks before it runs, from `## Options`.
+   *
+   * Empty for a card with one behaviour, which is most of them. Every binding
+   * a choice sets is one the plan reads, so the questions and the plan are one
+   * description and not two.
+   */
+  questions: Question[];
 }

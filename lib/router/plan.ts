@@ -64,7 +64,14 @@ export function route(prompt: string, cfg: RetrieveConfig = {}): RoutingResult {
     live,
     plan: {
       cardId: card.id,
-      intent: card.id.replace(/-/g, ' '),
+      /**
+       * What the run is CALLED, which is not its id.
+       *
+       * It was the id with the hyphens taken out, so every message about a
+       * subtitle run began "subtitle burn:". An id is for the router and the
+       * repo; the card names itself for everywhere else.
+       */
+      intent: card.meta.name ?? card.meta.tool_name ?? card.id.replace(/-/g, ' '),
       rationale: winner.why.length
         ? `matched ${winner.why.map((w) => `“${w}”`).join(', ')}`
         : 'best free-text overlap with the card body, no phrase fired, so this is a weak match',

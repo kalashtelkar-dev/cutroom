@@ -98,3 +98,47 @@ describe('a pipeline run body', () => {
     assert.match(said, /audio:/);
   });
 });
+
+/**
+ * The check runs over the BODY, not over the bindings.
+ *
+ * This is the defect the user saw on screen: every subtitle run failed before
+ * it started, saying `selection: clp_tevzon7u is an id inside the document,
+ * not a file in storage. Use $source.` The advice was correct and the key was
+ * not in the request. The shell seeds `selection` with the selected clip's id
+ * for the benefit of local timeline ops, the check was handed the whole
+ * bindings object, and it reported on a value nothing was going to send.
+ *
+ * Both halves are worth pinning, because the same mistake in the other
+ * direction is silent: over the bindings, `checkOperationInput` found nothing
+ * to object to either, since the bindings have no port named `input`. The
+ * check that fired falsely on pipelines did not fire at all on operations.
+ */
+describe('a check of the bindings is not a check of the request', () => {
+  const bindings = {
+    selection: 'clp_tevzon7u',
+    playhead: 0,
+    timeline: { tracks: [] },
+    source: 'input/2026-09-16/a.mp4',
+  };
+
+  test('a seeded clip id nothing sends is not a problem with the run', () => {
+    // what the shell knows
+    assert.equal(checkRunBody(bindings).length, 1, 'the bindings alone do look wrong');
+    // what the step actually posts, once $source has resolved
+    assert.deepEqual(checkRunBody({ video: bindings.source }), []);
+  });
+
+  test('an operation is checked on its ports, which the bindings do not have', () => {
+    assert.deepEqual(
+      checkOperationInput('whisperx', 'subtitle', bindings),
+      [],
+      'no port called `input` in there, so checking the bindings checks nothing',
+    );
+    assert.equal(
+      checkOperationInput('whisperx', 'subtitle', { input: '$source' }).length,
+      1,
+      'and the body is where an unresolved binding is actually visible',
+    );
+  });
+});

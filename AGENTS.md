@@ -257,6 +257,70 @@ made every place that assumed a closed union fail to compile except
 into a transition. Exhaustive switches, not fall-through defaults, in anything
 that reads `item.kind`.
 
+**An operation is a JOB and a job has no stream.** A published pipeline is a
+RUN at `/v1/runs/{id}`, with `/v1/runs/{id}/stream` beside it. An operation is
+a JOB at `/v1/jobs/{id}` and there is no stream at all: `/v1/jobs/{id}/stream`
+is not a route, and putting a job id to the run stream answers `no run "..."`.
+Every card in play ran a pipeline, so `browserTransport`'s operation path had
+never been exercised by anything and asked for a stream that does not exist.
+It polls now, yielding SSE frames so `parseSse` and `readJobEvent` read a
+polled job and a streamed run through one path; which kind an id is comes from
+the step that started it, because nothing in the id says.
+
+**`whisperx/translate` returns the source language unless you name a model
+that can translate.** Default model, cpu tier, five seconds of Hindi: status
+`succeeded`, and the text comes back in Hindi. The same call plus
+`model: "large-v3"`: English. No error, no flag, nothing in the job to read.
+And once it does translate it answers `alignSkipped: translated text cannot be
+force-aligned against source-language audio` with ONE segment for the whole
+clip, which is a caption on screen for the length of the programme. So
+subtitles in another language are always transcribe first, then translate the
+cues with `vllm/translate`, which keeps them over the footage they belong to.
+
+**`vllm/translate` re-segments unless `system` tells it not to.** Three runs
+over the same seven seconds measured three behaviours: one cue in and one out,
+one cue in and three out, and four aligned cues in and ONE out. A fourth came
+back with an empty list. Naming the requirement in `system` fixed it, measured
+across two target languages and two batch sizes, and `retimeTranslation` in
+`lib/subtitles/cues.ts` is the second half: when the counts line up the
+timings come off the aligner, which measured them against the audio, not off a
+language model, which measured nothing.
+
+**The pre-flight check reads the BODY, not the bindings.** The shell seeds
+`selection` with the selected clip's id for local timeline ops, and
+`checkRunBody` was handed the whole bindings object, so every subtitle run
+died before it started saying `selection: clp_... is an id inside the
+document`. The advice was right and the key was not in the request. The same
+vacancy ran the other way on operations: `checkOperationInput` only looks at
+ports the input carries, the bindings carry no port called `input`, so the
+check that refused pipelines falsely never fired on operations at all.
+
+**A card can ask a question, and a question must claim a phrase to take an
+answer from the prompt.** `## Options` on a card declares the questions, their
+choices, and the bindings each choice sets, and `test/options.test.ts` fails
+if the plan reads a `$name` nothing can set. The claim rule is the one the
+cards themselves live under: "put hindi subtitles on this" names a language
+once and two questions could want it, and "translate from hindi to english"
+names two for two. A question that claims nothing in the prompt is asked
+rather than guessed, because being asked is a click and guessing wrong is a
+GPU minute and a timeline in the wrong language.
+
+**`$name?` is a param the plan can do without.** Omitting `language` on a
+whisperx node means "detect it", which is a real answer; sending the literal
+`"$spoken"` is neither and the schema refuses it, and sending null is a
+present-but-empty param the server reads as an answer. A trailing `?` drops
+the key from the request when nothing bound it.
+
+**Nothing on screen names an engine, an operation or a pipeline id.** A step
+says what it is doing in the words its card wrote for it, and `describeStep`
+falls back to a generic phrase rather than to `whisperx/subtitle`. A card's
+`## What it does` is read out loud by `blurb()`, so what it is built on lives
+under `## How it is built`, which nothing renders.
+`test/no-vendor-names.test.ts` takes the engine list from the catalogue and
+checks every string the panel is handed, so an engine the server gains is
+covered the day it arrives. The workbench is out of scope on purpose: naming
+operations is its whole job.
+
 **A card's `pipelineId` is a claim about someone's account, and
 `npm run cards` is what checks it.** Three of the four pipeline cards were
 broken in ways nothing could catch: two named `tpl_subs` and `tpl_words`,
@@ -329,6 +393,8 @@ rename turns the test into a no-op that reports success forever.
     npm run prove:caption-edit      # drag a cue, pull its edge, retype its words
     npm run check:delivery   # every export destination compiles, on both sides, free
     npm run prove:vertical   # a 16:9 cut as a 9:16 reel: bars for contain, none for cover
+    npm run prove:assistant-ask     # ask for subtitles, answer the chips, watch it run
+    npm run prove:subtitle-language # subtitles in the language spoken, and in another
 
 Edit an intel card in `lib/intel/cards/*.md`, run `npm run intel`, then
 `npm test`, the eval suite runs the real router over 15 things a person would

@@ -40,7 +40,9 @@ export function RunCard({ run, title }: RunCardProps) {
       <section className="cr-run" aria-label={`Run ${run.runId}`}>
         <header className="cr-runhead">
           <Phase status={run.status} />
-          <span className="cr-runttl">{title ?? run.cardId ?? 'Run'}</span>
+          {/* `run.cardId` is an id, so a run with no title says "Run" rather
+              than naming the card the router picked */}
+          <span className="cr-runttl">{title ?? 'Run'}</span>
           <span className="cr-runel" aria-label="elapsed">{(elapsed / 1000).toFixed(1)}s</span>
         </header>
 

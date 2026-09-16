@@ -16,7 +16,7 @@
 import { useState } from 'react';
 import { ToolIcon } from '../rail/ToolRail.tsx';
 import type { Tool } from '../rail/tools.ts';
-import { toolBlurb, toolCost, toolRung } from '../rail/tools.ts';
+import { toolBlurb, toolCost } from '../rail/tools.ts';
 
 export interface ToolRunArgs {
   /** The chosen entry from `targets`, verbatim. */
@@ -95,7 +95,10 @@ export function ToolRunCard({
         </div>
 
         <div className="cr-tcf">
-          <span className="cr-tcmeta">rung {toolRung(tool)} · {tool.cardId}</span>
+          {/* the rung and the card id are the router's vocabulary, not the
+              user's: what they need here is what it costs, and that is in
+              the header already */}
+          <span className="cr-tcmeta" />
           <button type="button" className="cr-tcno" onClick={onCancel}>Cancel</button>
           <button
             type="button"

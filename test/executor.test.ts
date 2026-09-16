@@ -19,12 +19,24 @@ import type { Step } from '../lib/intel/types.ts';
 const tick = () => new Promise<void>((r) => setTimeout(r, 0));
 
 /** `imagemagick/*` is cpu in the catalogue and `ffmpeg/*` is gpu. */
-const blur = (input = '$src', extra: Record<string, unknown> = {}): Step => ({
+/**
+ * A real-looking object key, not `$src`.
+ *
+ * It was `$src`, bound by nothing, for as long as the pre-flight check ran
+ * over the bindings rather than over the body: `checkOperationInput` only
+ * looks at ports the input actually carries, and the bindings carry no port
+ * called `input`, so the check was vacuous and every step in this file posted
+ * the literal text "$src" to a fake that did not care. The same vacancy on
+ * the pipeline side was the false refusal that killed every subtitle run.
+ */
+const KEY = 'input/2026-09-16/fixture.png';
+
+const blur = (input = KEY, extra: Record<string, unknown> = {}): Step => ({
   kind: 'operation', engine: 'imagemagick', operation: 'blur', params: { input }, ...extra,
 });
 
 /** `ffmpeg/*` is gpu in the catalogue, which is the other half of the tier rule. */
-const trim = (input = '$src', extra: Record<string, unknown> = {}): Step => ({
+const trim = (input = KEY, extra: Record<string, unknown> = {}): Step => ({
   kind: 'operation', engine: 'ffmpeg', operation: 'trim', params: { input }, ...extra,
 });
 
@@ -354,7 +366,7 @@ describe('schedule', () => {
   });
 
   test('independent steps run together, capped by the engine', () => {
-    const steps = Array.from({ length: 6 }, () => blur('$src', { needs: [] }));
+    const steps = Array.from({ length: 6 }, () => blur(KEY, { needs: [] }));
     const batches = scheduleSteps(steps, { maxParallel: 8, maxParallelPerEngine: { imagemagick: 2 } });
     assert.deepEqual(batches, [['s0', 's1'], ['s2', 's3'], ['s4', 's5']]);
   });
@@ -365,13 +377,13 @@ describe('schedule', () => {
     assert.equal(engineCap('ffmpeg', withDefaults({ maxParallelPerEngine: { ffmpeg: 0 } })), 1);
     assert.equal(engineCap('ffmpeg', withDefaults({ maxParallel: 2, maxParallelPerEngine: { ffmpeg: 50 } })), 2);
     const steps = Array.from({ length: 3 }, () => ({
-      kind: 'operation', engine: 'ffmpeg', operation: 'trim', params: { input: '$src' }, needs: [],
+      kind: 'operation', engine: 'ffmpeg', operation: 'trim', params: { input: KEY }, needs: [],
     }) as Step);
     assert.deepEqual(scheduleSteps(steps, { maxParallel: 8 }), [['s0'], ['s1'], ['s2']]);
   });
 
   test('the global cap wins over a generous per-engine one', () => {
-    const steps = Array.from({ length: 4 }, () => blur('$src', { needs: [] }));
+    const steps = Array.from({ length: 4 }, () => blur(KEY, { needs: [] }));
     assert.deepEqual(
       scheduleSteps(steps, { maxParallel: 2, maxParallelPerEngine: { imagemagick: 10 } }),
       [['s0', 's1'], ['s2', 's3']],
@@ -403,7 +415,7 @@ describe('schedule', () => {
 
   test('explicit needs build a real DAG, not just a chain', () => {
     const plan: Step[] = [
-      blur('$src', { id: 'probe', needs: [] }),
+      blur(KEY, { id: 'probe', needs: [] }),
       blur('$a', { id: 'left', needs: ['probe'] }),
       blur('$b', { id: 'right', needs: ['probe'] }),
       blur('$c', { id: 'join', needs: ['left', 'right'] }),
@@ -577,6 +589,43 @@ describe('bindings', () => {
     assert.equal(resolveBindings('$missing', b), '$missing', 'the repair loop needs the name');
     assert.equal(resolveBindings('plain', b), 'plain');
   });
+
+  /**
+   * `$name?` is the difference between "detect the language" and a param
+   * holding the two characters `$s`. whisperx takes an ISO code; omitting it
+   * means detect, sending null means a present-but-empty answer, and sending
+   * the literal text fails the schema. Only one of the three is what a card
+   * writing `"language": "$spoken?"` meant.
+   */
+  test('an optional binding nobody set leaves no key at all', () => {
+    assert.deepEqual(
+      resolveBindings({ input: '$src', language: '$spoken?' }, { src: 'in/a.wav' }),
+      { input: 'in/a.wav' },
+    );
+    assert.deepEqual(
+      resolveBindings({ language: '$spoken?' }, { spoken: 'hi' }),
+      { language: 'hi' },
+      'and one that IS set is just a binding',
+    );
+  });
+
+  test('an optional binding set to nothing is still nothing', () => {
+    for (const spoken of [undefined, null, '']) {
+      assert.deepEqual(
+        resolveBindings({ language: '$spoken?' }, { spoken }),
+        {},
+        `a question skipped with ${JSON.stringify(spoken)} must not become a param`,
+      );
+    }
+  });
+
+  test('an optional binding drops out of a list rather than leaving a hole', () => {
+    assert.deepEqual(resolveBindings(['a', '$gone?', 'b'], {}), ['a', 'b']);
+  });
+
+  test('a required binding is still left intact, so the error names it', () => {
+    assert.deepEqual(resolveBindings({ input: '$src' }, {}), { input: '$src' });
+  });
 });
 
 // ── 6. the executor, against a fake transport ───────────────────────────
@@ -689,7 +738,7 @@ describe('executor', () => {
       Array.from({ length: 6 }, (_, i) => [`s${i}`, { ticks: 3 }]),
     ));
     const { exec } = harness(fake, { maxParallel: 8, maxParallelPerEngine: { imagemagick: 2 } });
-    const steps = Array.from({ length: 6 }, () => blur('$src', { needs: [] }));
+    const steps = Array.from({ length: 6 }, () => blur(KEY, { needs: [] }));
     const state = await exec.run({ cardId: 'c', steps });
 
     assert.equal(fake.peakFor('imagemagick'), 2, 'never more than the engine can serve');
@@ -703,7 +752,7 @@ describe('executor', () => {
     ));
     const { exec } = harness(fake, { maxParallel: 8 });
     const steps = Array.from({ length: 4 }, () => ({
-      kind: 'operation', engine: 'ffmpeg', operation: 'trim', params: { input: '$src' }, needs: [],
+      kind: 'operation', engine: 'ffmpeg', operation: 'trim', params: { input: KEY }, needs: [],
     }) as Step);
     await exec.run({ cardId: 'c', steps });
     assert.equal(fake.peakFor('ffmpeg'), 1);
@@ -716,13 +765,14 @@ describe('executor', () => {
     const { exec, events } = harness(fake, { maxParallel: 8, maxParallelPerEngine: { imagemagick: 8 } });
     const plan: Step[] = [{ kind: 'fanout', over: '$items', maxParallel: 2, body: [blur('$item')] }];
     const state = await exec.run({ cardId: 'c', steps: plan, estSeconds: null }, {
-      bindings: { items: ['a', 'b', 'c', 'd'] },
+      bindings: { items: ['in/a.png', 'in/b.png', 'in/c.png', 'in/d.png'] },
     });
 
     assert.equal(fake.calls.length, 4);
     assert.equal(fake.peakFor('imagemagick'), 2, 'the gate caps its own children');
     // each child saw its own item, which is the per-item value the graph cannot express
-    assert.deepEqual(fake.calls.map((c) => c.input.input).sort(), ['a', 'b', 'c', 'd']);
+    assert.deepEqual(fake.calls.map((c) => c.input.input).sort(),
+      ['in/a.png', 'in/b.png', 'in/c.png', 'in/d.png']);
     assert.equal(state.status, 'done');
     assert.equal(state.steps.length, 5, 'the gate plus one row per item');
     assertCoherent(state);
@@ -801,7 +851,7 @@ describe('executor', () => {
       's0#2.0': { ticks: 2 },
     });
     const { exec } = harness(fake, { maxParallel: 8, maxParallelPerEngine: { imagemagick: 8 } });
-    const plan: Step[] = [{ kind: 'fanout', over: ['a', 'b', 'c'], body: [blur('$item')] }, blur('$after')];
+    const plan: Step[] = [{ kind: 'fanout', over: ['in/a.png', 'in/b.png', 'in/c.png'], body: [blur('$item')] }, blur('$after')];
     const state = await exec.run({ cardId: 'c', steps: plan });
 
     // fatal halts the run: the step after the fanout must not run on partial results
@@ -830,7 +880,7 @@ describe('executor', () => {
       { maxParallel: 8, maxParallelPerEngine: { imagemagick: 8 }, maxRetriesPerStep: 3 },
       { transport: boundedStarts(fake, ctrl, 12) },
     );
-    const plan: Step[] = [{ kind: 'fanout', over: ['a', 'b', 'c'], body: [blur('$item')] }, blur('$after')];
+    const plan: Step[] = [{ kind: 'fanout', over: ['in/a.png', 'in/b.png', 'in/c.png'], body: [blur('$item')] }, blur('$after')];
     const state = await exec.run({ cardId: 'c', steps: plan }, { signal: ctrl.signal });
 
     assert.equal(fake.calls.length, 3, 'three children, one start each: a dead step is never rescheduled');
@@ -859,7 +909,7 @@ describe('executor', () => {
       { maxParallel: 8, maxParallelPerEngine: { imagemagick: 8 }, maxRetriesPerStep: 2 },
       { transport: boundedStarts(fake, ctrl, 12) },
     );
-    const plan: Step[] = [{ kind: 'fanout', over: ['a', 'b'], body: [blur('$item')] }];
+    const plan: Step[] = [{ kind: 'fanout', over: ['in/a.png', 'in/b.png'], body: [blur('$item')] }];
     const state = await exec.run({ cardId: 'c', steps: plan }, { signal: ctrl.signal });
 
     // Two retries on top of the first try, and then it is over. Rescheduling
@@ -875,7 +925,7 @@ describe('executor', () => {
   test('a dangling needs fails the plan, with a run.complete behind it', async () => {
     const fake = fakeTransport();
     const { exec, events } = harness(fake);
-    const state = await exec.run({ cardId: 'c', steps: [blur('$src', { id: 'a', needs: ['nope'] })] });
+    const state = await exec.run({ cardId: 'c', steps: [blur(KEY, { id: 'a', needs: ['nope'] })] });
 
     assert.equal(fake.calls.length, 0);
     const failed = ofType(events, 'step.failed');
@@ -906,10 +956,10 @@ describe('executor', () => {
 
   test('a branch runs exactly one side, and only that side is scheduled', async () => {
     const cases = [
-      { when: true, input: 'spoken.wav', ran: 's0.then.0', idle: 's0.else.0' },
-      { when: false, input: 'silent.wav', ran: 's0.else.0', idle: 's0.then.0' },
+      { when: true, input: 'input/spoken.wav', ran: 's0.then.0', idle: 's0.else.0' },
+      { when: false, input: 'input/silent.wav', ran: 's0.else.0', idle: 's0.then.0' },
       // an empty list is a decision, not a missing value
-      { when: [] as unknown[], input: 'silent.wav', ran: 's0.else.0', idle: 's0.then.0' },
+      { when: [] as unknown[], input: 'input/silent.wav', ran: 's0.else.0', idle: 's0.then.0' },
     ];
     for (const c of cases) {
       const fake = fakeTransport();
@@ -918,7 +968,7 @@ describe('executor', () => {
         { kind: 'branch', when: '$hasSpeech', then: [blur('$spoken')], else: [blur('$silent')] },
       ];
       const state = await exec.run({ cardId: 'c', steps: plan }, {
-        bindings: { hasSpeech: c.when, spoken: 'spoken.wav', silent: 'silent.wav' },
+        bindings: { hasSpeech: c.when, spoken: 'input/spoken.wav', silent: 'input/silent.wav' },
       });
 
       const label = JSON.stringify(c.when);
@@ -977,16 +1027,91 @@ describe('executor', () => {
     assert.deepEqual(foldRun(events), state);
   });
 
+  /**
+   * What leaves the machine is the params, and only the params.
+   *
+   * `stepInput` used to merge `pipelineId`, `graph`, `target` and `from` in
+   * beside them, and the transport filtered those names back out on the way
+   * past. That works right up until a real param is called one of them, and
+   * one is: `vllm/translate` takes a required `target`, which the filter would
+   * have stripped, and the job would have failed asking for the very thing the
+   * card supplied.
+   */
+  test("a param called target is posted, not mistaken for the step's own field", async () => {
+    const fake = fakeTransport();
+    const { exec } = harness(fake, { maxParallel: 2, maxParallelPerEngine: { vllm: 2 } });
+    const state = await exec.run({
+      cardId: 'subtitle-burn',
+      steps: [{
+        kind: 'operation', engine: 'vllm', operation: 'translate',
+        params: {
+          connection: { use: 'a-connection' },
+          segments: [{ start: 0, end: 1, text: 'hi' }],
+          target: 'hindi',
+        },
+      }],
+    });
+    assert.equal(state.status, 'done');
+    assert.equal(fake.calls.length, 1);
+    assert.equal(fake.calls[0].input.target, 'hindi');
+    assert.equal(fake.calls[0].input.pipelineId, undefined, 'plumbing never travels in the body');
+    assert.equal(fake.calls[0].input.kind, undefined);
+  });
+
+  /**
+   * The seeded bindings are not the request.
+   *
+   * This is the run the user actually saw fail. `selection` is bound for the
+   * benefit of local timeline ops and no plan has ever asked for it; the
+   * check was reading it and refusing the run over a key nothing sends.
+   */
+  test('a clip id in the bindings does not refuse a step that never asked for one', async () => {
+    const fake = fakeTransport();
+    const { exec } = harness(fake, { maxParallel: 2, maxParallelPerEngine: { whisperx: 2 } });
+    const state = await exec.run(
+      {
+        cardId: 'subtitle-burn',
+        steps: [{
+          kind: 'operation', engine: 'whisperx', operation: 'subtitle',
+          params: { input: '$source', language: '$spoken?' },
+        }],
+      },
+      { bindings: { selection: 'clp_tevzon7u', playhead: 0, source: 'input/2026-09-16/a.mp4' } },
+    );
+
+    assert.equal(state.status, 'done', 'the run that used to die before it started');
+    assert.equal(fake.calls[0].input.input, 'input/2026-09-16/a.mp4');
+    assert.equal(fake.calls[0].input.selection, undefined, 'a binding is not a param');
+    assert.equal('language' in fake.calls[0].input, false, 'nobody answered, so detect it');
+  });
+
+  test('and a clip id where the footage belongs still stops the run', async () => {
+    const fake = fakeTransport();
+    const { exec } = harness(fake, { maxParallel: 2, maxParallelPerEngine: { whisperx: 2 } });
+    const state = await exec.run(
+      {
+        cardId: 'subtitle-burn',
+        steps: [{
+          kind: 'operation', engine: 'whisperx', operation: 'subtitle',
+          params: { input: '$selection' },
+        }],
+      },
+      { bindings: { selection: 'clp_tevzon7u' } },
+    );
+    assert.equal(state.status, 'failed');
+    assert.equal(fake.calls.length, 0, 'nothing reaches the API');
+  });
+
   test('a result object binds names the next step can reference', async () => {
-    const fake = fakeTransport({ s0: { result: { candidates: ['x', 'y'] } } });
+    const fake = fakeTransport({ s0: { result: { candidates: ['in/x.png', 'in/y.png'] } } });
     const { exec } = harness(fake, { maxParallel: 4, maxParallelPerEngine: { imagemagick: 4 } });
     const plan: Step[] = [
-      blur('$src'),
+      blur(KEY),
       { kind: 'fanout', over: '$candidates', maxParallel: 4, body: [blur('$item')] },
     ];
     const state = await exec.run({ cardId: 'c', steps: plan });
     assert.equal(fake.calls.length, 3, 'one probe plus one child per candidate');
-    assert.deepEqual(fake.calls.slice(1).map((c) => c.input.input), ['x', 'y']);
+    assert.deepEqual(fake.calls.slice(1).map((c) => c.input.input), ['in/x.png', 'in/y.png']);
     assert.equal(state.status, 'done');
   });
 });

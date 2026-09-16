@@ -16,6 +16,10 @@
  */
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { bindingsSet } from '../lib/intel/options.ts';
+import { validatePlan } from '../lib/router/plan.ts';
+import type { Step } from '../lib/intel/types.ts';
+import { SHELL_BINDINGS, FANOUT_BINDINGS } from '../lib/router/bindings.ts';
 import { parseCard } from '../lib/intel/parse.ts';
 import { checkFileValue, filePorts } from '../lib/executor/bindingCheck.ts';
 import { getNode } from '../lib/editor-api/catalogue.ts';
@@ -91,12 +95,33 @@ const rows: string[] = [];
  * file port should ever be bound to: the editor resolves the tool's target
  * and checks the key is readable before any of this starts.
  */
-const PROVIDED = new Set(['source', 'sourceMediaKey', 'selection', 'playhead', 'timeline', 'item', 'index']);
+const PROVIDED = new Set([...SHELL_BINDINGS, ...FANOUT_BINDINGS]);
 const FILE_BINDING = 'source';
 
-/** Every `$name` a plan reads, at any depth. */
+/**
+ * Every `$name` a plan reads, at any depth.
+ *
+ * The trailing `?` of an optional binding is not part of the name. Left on,
+ * `$spoken?` was reported as a binding called "spoken?" that nothing sets,
+ * which is true and useless: the whole point of the `?` is that nothing has
+ * to set it.
+ */
+/** Every step in a plan, including the ones inside a fanout or a branch. */
+function flatSteps(steps: readonly Step[]): Step[] {
+  const out: Step[] = [];
+  for (const step of steps) {
+    out.push(step);
+    for (const side of ['body', 'then', 'else'] as const) {
+      if (Array.isArray(step[side])) out.push(...flatSteps(step[side] as Step[]));
+    }
+  }
+  return out;
+}
+
 function bindingsUsed(value: unknown, into: Set<string> = new Set()): Set<string> {
-  if (typeof value === 'string' && value.startsWith('$')) into.add(value.slice(1).split('.')[0]);
+  if (typeof value === 'string' && value.startsWith('$')) {
+    into.add(value.slice(1).replace(/\?$/, '').split('.')[0]);
+  }
   else if (Array.isArray(value)) for (const v of value) bindingsUsed(v, into);
   else if (value && typeof value === 'object') {
     for (const v of Object.values(value as Record<string, unknown>)) bindingsUsed(v, into);
@@ -122,6 +147,8 @@ if (!files.length) {
 
 let pipelineSteps = 0;
 let cardsRead = 0;
+/** Steps actually put to the catalogue, so a vacuous run cannot report success. */
+let checkedSteps = 0;
 
 for (const file of files.sort()) {
   const card = parseCard(readFileSync(join(CARDS, file), 'utf8'), file.replace(/\.md$/, ''));
@@ -135,7 +162,16 @@ for (const file of files.sort()) {
    * a real string that is not a file. All four reached the live API.
    */
   {
-    const have = new Set(PROVIDED);
+    /**
+     * The shell's bindings, plus whatever the card's own questions answer.
+     *
+     * A question's choices name the bindings they set, so a card that asks
+     * for a language has supplied `$target` by the time its plan reads one.
+     * The card is one description: the questions and the plan are checked
+     * against each other here and in `test/options.test.ts`, and neither can
+     * be edited into disagreement without one of them saying so.
+     */
+    const have = new Set([...PROVIDED, ...bindingsSet(card.questions)]);
     const missing: string[] = [];
 
     /** Walk in order: a step may read what the steps before it produced. */
@@ -191,6 +227,25 @@ for (const file of files.sort()) {
       rows.push(`  FAIL  ${card.id.padEnd(20)} rung ${card.rung}  reads $${name}, which nothing binds`);
       problems.push(`${card.id}: reads $${name}, and no earlier step produces it`);
     }
+  }
+
+  /**
+   * Every step the card names, checked offline against the catalogue.
+   *
+   * This used to run only over the pipeline halves of a plan, and the line at
+   * the bottom said so. The moment the one card in play stopped naming a
+   * pipeline, the whole script reported a clean run having compared nothing,
+   * which is the failure mode this repo has written down twice. An operation
+   * is just as capable of naming something that does not exist, or of being
+   * handed a param the node's schema refuses, and both are free to catch:
+   * the catalogue is committed.
+   */
+  for (const problem of validatePlan(card.steps)) {
+    rows.push(`  FAIL  ${card.id.padEnd(20)} rung ${card.rung}  step ${problem.step}: ${problem.code}`);
+    problems.push(`${card.id}: ${problem.message}`);
+  }
+  for (const st of flatSteps(card.steps)) {
+    if (st.kind === 'operation' || st.kind === 'pipeline' || st.kind === 'graph') checkedSteps += 1;
   }
 
   const walk = (list: readonly unknown[]): void => {
@@ -296,10 +351,18 @@ if (cardsRead !== files.length) {
   process.exit(1);
 }
 
+// and the last hole: a shelf of cards that name no runnable step at all would
+// otherwise leave a clean run having compared nothing
+if (checkedSteps === 0) {
+  console.error('\nno card names an operation, a pipeline or a graph, so this checked nothing\n');
+  process.exit(1);
+}
+
 if (problems.length) {
   console.log(`\n${problems.length} card(s) would fail when run:\n`);
   for (const p of problems) console.log(`  ${p}`);
   console.log('');
   process.exit(1);
 }
-console.log('\nevery card that names a pipeline can actually run it\n');
+console.log(`\nevery card checks out: ${checkedSteps} step(s) against the catalogue`
+  + `${pipelineSteps ? `, ${pipelineSteps} of them against a real pipeline` : ''}\n`);

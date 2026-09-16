@@ -31,7 +31,9 @@
     "prove:caption-edit": "node --experimental-strip-types scripts/prove-caption-edit.ts",
     "prove:caption-playback": "node --experimental-strip-types scripts/prove-caption-playback.ts",
     "check:delivery": "node --experimental-strip-types scripts/check-delivery.ts",
-    "prove:vertical": "node --experimental-strip-types scripts/prove-vertical.ts"
+    "prove:vertical": "node --experimental-strip-types scripts/prove-vertical.ts",
+    "prove:subtitle-language": "node --experimental-strip-types scripts/prove-subtitle-language.ts",
+    "prove:assistant-ask": "node --experimental-strip-types scripts/prove-assistant-ask.ts"
   },
   "dependencies": {
     "next": "16.3.5",

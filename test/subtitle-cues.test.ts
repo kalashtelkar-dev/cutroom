@@ -17,7 +17,7 @@ import { RATES, frames } from '../lib/time/frames.ts';
 import { emptyTimeline, placeTrack } from '../lib/timeline/document.ts';
 import { applyEdits } from '../lib/timeline/edits.ts';
 import { parseSrt } from '../lib/subtitles/srt.ts';
-import { parseWhisperCues, cuesInOutput } from '../lib/subtitles/cues.ts';
+import { parseWhisperCues, cuesInOutput, retimeTranslation } from '../lib/subtitles/cues.ts';
 import { placeCuesOps, captionAt, cuesOf } from '../lib/subtitles/place.ts';
 import type { Timeline } from '../lib/timeline/types.ts';
 
@@ -234,5 +234,59 @@ describe('cues onto a project that has no subtitle track', () => {
       () => placeCuesOps(emptyDoc(), parseWhisperCues(SEGMENTS, R)),
       /no subtitle track/,
     );
+  });
+});
+
+/**
+ * A translation, put back on the timings the aligner measured.
+ *
+ * `vllm/translate` answers with segments of its own and they are not the ones
+ * it was handed. Three runs over the same seven seconds of Hindi measured
+ * three behaviours: one cue in and one out on the same boundaries, one cue in
+ * and three out, and four aligned cues in and ONE out ending a frame early.
+ * The third is a caption on screen for the length of the clip, which is what
+ * `whisperx/translate` was rejected for, so a plan that relies on the model's
+ * numbers has not solved the problem it set out to solve.
+ */
+describe('retiming a translation', () => {
+  const cue = (start: number, duration: number, text: string) =>
+    ({ start: frames(start), duration: frames(duration), text });
+
+  test('matching counts take the aligner timings and the model words', () => {
+    const aligned = [cue(5, 24, 'नमस्ते'), cue(30, 40, 'यह एक परीक्षण है')];
+    const translated = [cue(4, 26, 'Hello'), cue(31, 38, 'This is a test')];
+
+    const { cues, retimed } = retimeTranslation(aligned, translated);
+    assert.equal(retimed, true);
+    assert.deepEqual(cues.map((c) => [c.start, c.duration]), [[5, 24], [30, 40]],
+      'the aligner measured these against the audio; the model measured nothing');
+    assert.deepEqual(cues.map((c) => c.text), ['Hello', 'This is a test']);
+  });
+
+  test('a different count keeps the model spans, and says so', () => {
+    // one long line in English is three in the target, or the other way round:
+    // forcing that onto the original cues would throw two thirds of it away
+    const aligned = [cue(5, 100, 'एक लंबा वाक्य')];
+    const translated = [cue(5, 30, 'One'), cue(40, 30, 'long'), cue(75, 30, 'sentence')];
+
+    const { cues, retimed } = retimeTranslation(aligned, translated);
+    assert.equal(retimed, false);
+    assert.equal(cues.length, 3);
+    assert.deepEqual(cues.map((c) => c.text), ['One', 'long', 'sentence']);
+  });
+
+  test('a translation that came back empty is empty, never the original', () => {
+    const aligned = [cue(5, 24, 'नमस्ते')];
+    const { cues, retimed } = retimeTranslation(aligned, []);
+    assert.deepEqual(cues, [], 'placing the source language here is the silent wrong-language bug');
+    assert.equal(retimed, false);
+  });
+
+  test('the words are the only thing taken from the model', () => {
+    const aligned = [cue(5, 24, 'नमस्ते')];
+    const translated = [{ ...cue(999, 1, 'Hello'), extra: 'ignored' }];
+    const { cues } = retimeTranslation(aligned, translated);
+    assert.equal(cues[0].start, frames(5));
+    assert.equal(cues[0].duration, frames(24));
   });
 });

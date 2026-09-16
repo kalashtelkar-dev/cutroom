@@ -48,10 +48,14 @@ export interface EvalCase {
  * nothing but its own card's phrasing in it cannot see that happen.
  */
 export const SEED_CASES: EvalCase[] = [
-  { prompt: 'Burn subtitles on',                      expect: 'subtitle-burn', rung: 3, source: 'seed' },
-  { prompt: 'Add captions, two lines max',            expect: 'subtitle-burn', rung: 3, source: 'seed' },
-  { prompt: 'Put subs on this',                       expect: 'subtitle-burn', rung: 3, source: 'seed' },
-  { prompt: 'I need an SRT out of this',              expect: 'subtitle-burn', rung: 3, source: 'seed' },
+  { prompt: 'Burn subtitles on',                      expect: 'subtitle-burn', rung: 2, source: 'seed' },
+  { prompt: 'Add captions, two lines max',            expect: 'subtitle-burn', rung: 2, source: 'seed' },
+  { prompt: 'Put subs on this',                       expect: 'subtitle-burn', rung: 2, source: 'seed' },
+  { prompt: 'I need an SRT out of this',              expect: 'subtitle-burn', rung: 2, source: 'seed' },
+  { prompt: 'Put hindi subtitles on this',           expect: 'subtitle-burn', rung: 2, source: 'seed' },
+  { prompt: 'Subtitle this in english',              expect: 'subtitle-burn', rung: 2, source: 'seed' },
+  { prompt: 'Translate this into marathi',           expect: 'subtitle-burn', rung: 2, source: 'seed' },
+  { prompt: 'Translate this from hindi to english',  expect: 'subtitle-burn', rung: 2, source: 'seed' },
   // nothing in play answers these, and the card that is must not claim them
   { prompt: 'Even out the colour across shots',       expect: null,            rung: 0, source: 'seed' },
   { prompt: 'Delete this shot and close the gap',     expect: null,            rung: 0, source: 'seed' },

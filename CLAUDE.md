@@ -46,10 +46,34 @@ issuing the request. None of them could have been caught by any test.
 | A six second AAC bed is six seconds | 6.036854s. Packets are 1024 samples, and `audio-replace` keeps the longer stream, so the picture came out a frame long |
 | An unbound `$name` in a plan is caught somewhere | It is posted verbatim. `$program` reached the API as seven characters and came back `input_unreachable` |
 | `$selection` is what a pipeline reads | It is a clip id. It resolves, it is a real string, and it is not a file. `$source` is the key |
+| An operation's progress can be streamed like a run's | It cannot. `/v1/jobs/{id}/stream` is not a route, and a job id put to the run stream answers `no run "..."`. A job is polled |
+| `whisperx/translate` translates | Only if you name a model that can. Default model: status `succeeded`, and the text comes back in the SOURCE language. No error, no flag. `model: large-v3` translates |
+| ...and its output is usable as subtitles | It answers `alignSkipped` and ONE segment for the whole clip, which is one caption on screen for the length of the programme |
+| `vllm/translate` "keeps every timing" | It keeps the span and re-divides inside it, freely, in both directions: four aligned cues came back as one, one came back as three, and one run came back empty. `system` is what holds it to the segments it was given |
 
 **The rule: anything that touches the API is verified by calling it, before
 saying it works.** Not typechecked. Not unit tested against a fake. Called.
 `npm run prove` exists for this.
+
+## 1b. Checking the wrong object, in both directions at once
+
+`checkRunBody(bound)` was handed the whole BINDINGS object instead of the body
+the step was about to post. The shell seeds `selection` with the selected
+clip's id for local timeline ops, no plan has ever asked for it, and so every
+subtitle run died before it started with `selection: clp_tevzon7u is an id
+inside the document, not a file in storage. Use $source.` Every word of that
+was true and the key was not in the request.
+
+The same line was vacuous the other way. `checkOperationInput` only looks at
+ports the input actually carries; the bindings carry no port called `input`;
+so the check that refused pipelines falsely never fired on an operation at
+all. One expression, a false positive on one kind of step and a silent no-op
+on the other, and both were invisible to a suite of 1000 tests because the
+tests passed `$src`, bound by nothing, to a fake that did not care.
+
+**The rule: a check on what you are about to send is a check on WHAT YOU ARE
+ABOUT TO SEND.** Not on what you know. If the object under test is not the one
+that goes on the wire, it is not that check.
 
 ## 2. Verification that proves the code agrees with itself
 
@@ -69,6 +93,19 @@ Three more of the same shape:
   found something to compare before comparing it.
 - **A fake that cannot fail teaches nothing.** If the double always succeeds,
   the test only proves the happy path exists.
+
+## 2b. A fake transport cannot 404
+
+The executor ran operations through a fake that answered whatever it was
+scripted to answer, and `browserTransport`'s operation path had never been
+run by anything, because every card in play ran a pipeline. A pipeline is a
+RUN and has a stream; an operation is a JOB and has none. The first card to
+run an operation asked for the stream of a run that does not exist, got a 404,
+and left a job on the queue with nothing reading it.
+
+`npm run prove:assistant-ask` and `npm run prove:subtitle-language` exist
+because of this: one drives the panel with a real pointer, the other runs the
+card's own plan through the real transport against the live API.
 
 ## 3. Saying "finished" without adversarial review
 

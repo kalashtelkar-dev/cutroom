@@ -352,7 +352,7 @@ function Finished({ result, onClose }: { result: ExportResult; onClose: () => vo
         <dl className="cx-ids">
           <div><dt>File</dt><dd title={result.key}>{result.key}</dd></div>
           <div><dt>Run</dt><dd title={result.runId}>{result.runId}</dd></div>
-          <div><dt>Pipeline</dt><dd title={result.pipelineId}>{result.pipelineId}</dd></div>
+
         </dl>
 
         <p className="cx-fine">

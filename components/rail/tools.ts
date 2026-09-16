@@ -147,14 +147,16 @@ interface Presentation {
  */
 const PRESENTATION: Record<string, Presentation> = {
   /**
-   * No params, because neither of the two it had reached anything.
+   * No params written here, because the card carries its own now.
    *
-   * `runTool` reads `args.target` and nothing else, so Style and Language
-   * were two dropdowns that changed the run in no way at all. Language
-   * cannot be offered here even once something does read the params: it is
-   * a param on the whisperx nodes inside the pipeline, fixed in the graph,
-   * and a pipeline's run body only carries its input nodes. Boxed and
-   * karaoke need a caption style the document cannot hold yet.
+   * There used to be two, Style and Language, and neither reached anything:
+   * `runTool` read `args.target` and stopped. Language could not have worked
+   * even if it had, because the tool ran a published pipeline and the
+   * language was a param on the whisperx nodes INSIDE that pipeline's graph,
+   * where a run body cannot reach. It runs the operation directly now, so the
+   * language is a param again, and the card asks for it in the same words the
+   * assistant does. `paramsFrom` reads them off the card; anything written
+   * here would be the second copy this file exists to prevent.
    */
   'subtitle-burn': {
     group: 'GENERATE', order: 3, name: 'Gen Subtitles', icon: 'subtitles',
@@ -167,6 +169,28 @@ const PRESENTATION: Record<string, Presentation> = {
 function improvise(card: Card): Presentation {
   const name = card.id.replace(/[-_]/g, ' ').replace(/^./, (c) => c.toUpperCase());
   return { group: 'POLISH', order: 99, name, icon: 'graph' };
+}
+
+/**
+ * A card's questions as the arm card's dropdowns.
+ *
+ * One question is one dropdown, its choices in the order the card writes
+ * them, defaulting to the first, which is the same default the assistant
+ * takes when nobody answers. A card with no questions gets no dropdowns,
+ * which is every card but one.
+ *
+ * `label` is the question, trimmed of its question mark: a `<label>` beside a
+ * `<select>` reads as a field name, not as a sentence, and "What language is
+ * the speech in?" in that slot is a question nobody is being asked twice.
+ */
+export function paramsFrom(card: Card): ToolParam[] | undefined {
+  if (!card.questions.length) return undefined;
+  return card.questions.map((q) => ({
+    key: q.id,
+    label: q.ask.replace(/\s*\?\s*$/, ''),
+    options: q.choices.map((c) => c.label),
+    defaultIndex: 0,
+  }));
 }
 
 function presentationFor(card: Card): Presentation {
@@ -185,6 +209,7 @@ function presentationFor(card: Card): Presentation {
     name,
     needs,
     order,
+    params: paramsFrom(card) ?? fallback.params,
   };
 }
 
